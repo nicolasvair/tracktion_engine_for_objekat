@@ -83,16 +83,22 @@ NodeType* findNode (NodeGraph& nodeGraph, Predicate pred)
 template<typename NodeType>
 NodeType* findNodeWithID (NodeGraph& nodeGraph, size_t nodeIDToLookFor)
 {
-    auto found = std::find_if (nodeGraph.sortedNodes.begin(),
-                               nodeGraph.sortedNodes.end(),
-                               [nodeIDToLookFor] (auto nodeAndID)
-                               {
-                                   return nodeAndID.id == nodeIDToLookFor
-                                       && dynamic_cast<NodeType*> (nodeAndID.node) != nullptr;
-                               });
+    // OBJEKAT — sortedNodes est trié par identifiant (cf. operator< de NodeAndID),
+    // mais cette recherche le balayait linéairement, avec un dynamic_cast sur
+    // CHAQUE élément traversé. Comme chaque nœud appelle cette fonction pendant
+    // l'initialisation, le coût était N² sur le nombre de nœuds.
+    //
+    // On dichotomise pour isoler la plage des entrées portant cet identifiant
+    // (plusieurs nœuds peuvent le partager), et on ne teste le type que dans
+    // cette plage. Les entrées de même identifiant étant contiguës, le premier
+    // résultat trouvé est le même qu'avant : comportement identique.
+    const auto range = std::equal_range (nodeGraph.sortedNodes.begin(),
+                                         nodeGraph.sortedNodes.end(),
+                                         NodeAndID { nullptr, nodeIDToLookFor });
 
-    if (found != nodeGraph.sortedNodes.end())
-        return dynamic_cast<NodeType*> (found->node);
+    for (auto iter = range.first; iter != range.second; ++iter)
+        if (auto* castNode = dynamic_cast<NodeType*> (iter->node))
+            return castNode;
 
     return nullptr;
 }

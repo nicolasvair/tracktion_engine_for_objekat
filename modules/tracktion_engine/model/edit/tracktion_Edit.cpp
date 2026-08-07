@@ -1223,8 +1223,31 @@ void Edit::restartPlayback()
 {
     shouldRestartPlayback = true;
 
+    // OBJEKAT — amortisseur de reconstruction du graphe.
+    //
+    // Avant : le minuteur était armé à 1 ms après la PREMIÈRE demande et n'était
+    // pas réarmé par les suivantes. Une action qui modifie le modèle sur deux
+    // tours de boucle de messages (dupliquer un groupe, par exemple) payait donc
+    // deux reconstructions complètes au lieu d'une.
+    //
+    // Maintenant : chaque demande réarme le minuteur, donc une rafale d'éditions
+    // ne produit qu'une seule reconstruction, peu après le dernier geste. Le
+    // graphe se rebâtit toujours de lui-même et très vite : aucun objet ne peut
+    // rester silencieux, et rien n'est retardé au moment du play.
+    //
+    // Le plafond évite qu'un flux continu de demandes (un veilleur périodique,
+    // un glisser qui modifie le modèle en boucle) ne repousse indéfiniment la
+    // reconstruction : passé ce délai depuis la première demande en attente, on
+    // reconstruit sans plus attendre.
+    static constexpr int debounceMs = 30;
+    static constexpr juce::uint32 maxDelayMs = 150;
+
+    const auto now = juce::Time::getMillisecondCounter();
+
     if (! isTimerRunning())
-        startTimer (1);
+        firstPendingRestartMs = now;
+
+    startTimer ((now - firstPendingRestartMs) >= maxDelayMs ? 1 : debounceMs);
 }
 
 EditPlaybackContext* Edit::getCurrentPlaybackContext() const

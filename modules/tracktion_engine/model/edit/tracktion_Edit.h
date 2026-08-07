@@ -931,6 +931,9 @@ private:
     std::atomic<bool> isLoadInProgress { true };
     std::atomic<int> performingRenderCount { 0 };
     bool shouldRestartPlayback = false;
+    /** OBJEKAT — date de la plus ancienne demande de reconstruction encore en
+        attente, pour plafonner l'amortisseur de restartPlayback(). */
+    juce::uint32 firstPendingRestartMs = 0;
     bool blinkBright = false;
     bool lowLatencyMonitoring = false;
     bool latencyCompensationEnabled = true;

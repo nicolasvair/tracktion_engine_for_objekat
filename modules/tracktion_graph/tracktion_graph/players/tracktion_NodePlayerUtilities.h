@@ -12,6 +12,25 @@
 
 #include <span>
 
+/** OBJEKAT — sonde de mesure des reconstructions de graphe (étape 1).
+    Activée à 1 par défaut en Debug. Mettre à 0 (ou définir OBJ_GRAPH_PROFILE=0
+    dans les build settings) pour la désactiver complètement : le code disparaît.
+*/
+#ifndef OBJ_GRAPH_PROFILE
+ #if JUCE_DEBUG
+  #define OBJ_GRAPH_PROFILE 1
+ #else
+  #define OBJ_GRAPH_PROFILE 0
+ #endif
+#endif
+
+#if OBJ_GRAPH_PROFILE
+ #include <atomic>
+ #include <chrono>
+ #include <cstdio>
+ #include <cstdlib>
+#endif
+
 namespace tracktion::inline graph {
 
 namespace node_player_utils
@@ -116,10 +135,31 @@ namespace node_player_utils
         if (node == nullptr)
             return {};
 
+       #if OBJ_GRAPH_PROFILE
+        using obj_clock = std::chrono::steady_clock;
+        static std::atomic<int> objRebuildCounter { 0 };
+        const auto objRebuildIndex = ++objRebuildCounter;
+        const auto objT0 = obj_clock::now();
+       #endif
+
         // First give the Nodes a chance to transform
         auto nodeGraph = createNodeGraph (std::move (node), disableLatencyCompensation);
+
+       #if OBJ_GRAPH_PROFILE
+        const auto objT1 = obj_clock::now();
+       #endif
+
         assert (! areThereAnyCycles (nodeGraph->orderedNodes));
+
+       #if OBJ_GRAPH_PROFILE
+        const auto objT2 = obj_clock::now();
+       #endif
+
         jassert (areNodeIDsUnique (nodeGraph->orderedNodes, true));
+
+       #if OBJ_GRAPH_PROFILE
+        const auto objT3 = obj_clock::now();
+       #endif
 
         // Next, initialise all the nodes, this will call prepareToPlay on them
         const PlaybackInitialisationInfo info { sampleRate, blockSize,
@@ -129,6 +169,45 @@ namespace node_player_utils
 
         for (auto n : nodeGraph->orderedNodes)
             n->initialise (info);
+
+       #if OBJ_GRAPH_PROFILE
+        {
+            const auto objT4 = obj_clock::now();
+            auto ms = [] (auto a, auto b)
+            {
+                return std::chrono::duration<double, std::milli> (b - a).count();
+            };
+
+            char objLine[256] = {};
+            std::snprintf (objLine, sizeof (objLine),
+                "[GRAPH] rebuild #%d - %d noeuds - %.1f ms  (build %.1f | cycles %.1f | ids %.1f | init %.1f)\n",
+                objRebuildIndex,
+                (int) nodeGraph->orderedNodes.size(),
+                ms (objT0, objT4),
+                ms (objT0, objT1),
+                ms (objT1, objT2),
+                ms (objT2, objT3),
+                ms (objT3, objT4));
+
+            // Console Xcode
+            std::fputs (objLine, stderr);
+            std::fflush (stderr);
+
+            // ...et un fichier, pour que la mesure survive à un lancement hors Xcode.
+            // Réécrit à zéro au premier rebuild de chaque lancement.
+            if (const auto* home = std::getenv ("HOME"))
+            {
+                char objPath[512] = {};
+                std::snprintf (objPath, sizeof (objPath), "%s/objekat-graph.log", home);
+
+                if (auto* f = std::fopen (objPath, objRebuildIndex == 1 ? "w" : "a"))
+                {
+                    std::fputs (objLine, f);
+                    std::fclose (f);
+                }
+            }
+        }
+       #endif
 
         return nodeGraph;
     }

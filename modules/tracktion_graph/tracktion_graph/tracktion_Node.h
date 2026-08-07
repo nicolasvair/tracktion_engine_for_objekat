@@ -10,6 +10,8 @@
 
 #pragma once
 
+#include <unordered_set>
+
 //==============================================================================
 //==============================================================================
 /**
@@ -677,17 +679,42 @@ inline void Node::release()
 //==============================================================================
 namespace detail
 {
+    /** OBJEKAT — accélère le test « ai-je déjà vu ce nœud ? ».
+
+        Auparavant les nœuds visités n'étaient gardés que dans un std::vector,
+        relu de bout en bout (std::find) à chaque nœud rencontré : coût N² sur le
+        nombre de nœuds du graphe. On ajoute simplement un ensemble de hachage
+        tenu en parallèle, alimenté EXACTEMENT aux mêmes endroits que le vecteur.
+
+        Le vecteur reste la seule source de l'ordre de visite, et cet ordre est
+        celui du traitement audio : il est inchangé, à un nœud près. L'ensemble
+        ne sert qu'à la recherche.
+    */
+    struct VisitedNodes
+    {
+        std::vector<Node*> ordered;
+        std::unordered_set<Node*> seen;
+
+        bool contains (Node* n) const noexcept   { return seen.find (n) != seen.end(); }
+
+        void add (Node* n)
+        {
+            ordered.push_back (n);
+            seen.insert (n);
+        }
+    };
+
     struct VisitNodesWithRecord
     {
         template<typename Visitor>
-        static void visit (std::vector<Node*>& visitedNodes, Node& visitingNode, Visitor&& visitor, bool preordering)
+        static void visit (VisitedNodes& visitedNodes, Node& visitingNode, Visitor&& visitor, bool preordering)
         {
-            if (std::find (visitedNodes.begin(), visitedNodes.end(), &visitingNode) != visitedNodes.end())
+            if (visitedNodes.contains (&visitingNode))
                 return;
 
             if (preordering)
             {
-                visitedNodes.push_back (&visitingNode);
+                visitedNodes.add (&visitingNode);
                 visitor (visitingNode);
             }
 
@@ -696,7 +723,7 @@ namespace detail
 
             if (! preordering)
             {
-                visitedNodes.push_back (&visitingNode);
+                visitedNodes.add (&visitingNode);
                 visitor (visitingNode);
             }
         }
@@ -705,11 +732,11 @@ namespace detail
     struct VisitNodesWithRecordBFS
     {
         template<typename Visitor>
-        static void visit (std::vector<Node*>& visitedNodes, Node& visitingNode, Visitor&& visitor)
+        static void visit (VisitedNodes& visitedNodes, Node& visitingNode, Visitor&& visitor)
         {
-            if (std::find (visitedNodes.begin(), visitedNodes.end(), &visitingNode) == visitedNodes.end())
+            if (! visitedNodes.contains (&visitingNode))
             {
-                visitedNodes.push_back (&visitingNode);
+                visitedNodes.add (&visitingNode);
                 visitor (visitingNode);
             }
 
@@ -718,9 +745,9 @@ namespace detail
             // Visit each node then go back to the first and recurse
             for (auto n : inputs)
             {
-                if (std::find (visitedNodes.begin(), visitedNodes.end(), n) == visitedNodes.end())
+                if (! visitedNodes.contains (n))
                 {
-                    visitedNodes.push_back (n);
+                    visitedNodes.add (n);
                     visitor (visitingNode);
                 }
             }
@@ -734,14 +761,14 @@ namespace detail
 template<typename Visitor>
 inline void visitNodes (Node& node, Visitor&& visitor, bool preordering)
 {
-    std::vector<Node*> visitedNodes;
+    detail::VisitedNodes visitedNodes;
     detail::VisitNodesWithRecord::visit (visitedNodes, node, visitor, preordering);
 }
 
 template<typename Visitor>
 inline void visitNodesBFS (Node& node, Visitor&& visitor)
 {
-    std::vector<Node*> visitedNodes;
+    detail::VisitedNodes visitedNodes;
     detail::VisitNodesWithRecordBFS::visit (visitedNodes, node, visitor);
 }
 
@@ -750,26 +777,26 @@ inline std::vector<Node*> getNodes (Node& node, VertexOrdering vertexOrdering)
     if (vertexOrdering == VertexOrdering::bfsPreordering
         || vertexOrdering == VertexOrdering::bfsReversePreordering)
     {
-        std::vector<Node*> visitedNodes;
+        detail::VisitedNodes visitedNodes;
         detail::VisitNodesWithRecordBFS::visit (visitedNodes, node, [](auto&){});
 
         if (vertexOrdering == VertexOrdering::bfsReversePreordering)
-            std::reverse (visitedNodes.begin(), visitedNodes.end());
+            std::reverse (visitedNodes.ordered.begin(), visitedNodes.ordered.end());
 
-        return visitedNodes;
+        return std::move (visitedNodes.ordered);
     }
 
     bool preordering = vertexOrdering == VertexOrdering::preordering
                     || vertexOrdering == VertexOrdering::reversePreordering;
 
-    std::vector<Node*> visitedNodes;
+    detail::VisitedNodes visitedNodes;
     detail::VisitNodesWithRecord::visit (visitedNodes, node, [](auto&){}, preordering);
 
     if (vertexOrdering == VertexOrdering::reversePreordering
         || vertexOrdering == VertexOrdering::reversePostordering)
-       std::reverse (visitedNodes.begin(), visitedNodes.end());
+       std::reverse (visitedNodes.ordered.begin(), visitedNodes.ordered.end());
 
-    return visitedNodes;
+    return std::move (visitedNodes.ordered);
 }
 
 inline void addNodesRecursive (std::vector<NodeAndID>& nodeMap, Node& n)
