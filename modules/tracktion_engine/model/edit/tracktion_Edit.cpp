@@ -1239,8 +1239,13 @@ void Edit::restartPlayback()
     // un glisser qui modifie le modèle en boucle) ne repousse indéfiniment la
     // reconstruction : passé ce délai depuis la première demande en attente, on
     // reconstruit sans plus attendre.
-    static constexpr int debounceMs = 30;
-    static constexpr juce::uint32 maxDelayMs = 150;
+    // Réglage mesuré : à 30 ms, une duplication de groupe sur trois seulement
+    // était fusionnée (5 reconstructions pour 3 duplications) — en Debug, les
+    // deux tours de boucle d'un même geste sont espacés de plus de 30 ms.
+    // 120 ms les couvre. C'est aussi le délai perçu avant que le son ne reflète
+    // une édition faite à l'arrêt, et il a été jugé confortable.
+    static constexpr int debounceMs = 120;
+    static constexpr juce::uint32 maxDelayMs = 500;
 
     const auto now = juce::Time::getMillisecondCounter();
 

@@ -24,11 +24,32 @@
  #endif
 #endif
 
+/** OBJEKAT — recensement des nœuds par type (étape 3).
+    Répond à « de quoi sont faits les 24 nœuds par objet ? », préalable à toute
+    réduction de N. N'est compilé que si la sonde ci-dessus est active, et son
+    coût est pris APRÈS le dernier chronomètre : il ne fausse aucune mesure.
+*/
+#ifndef OBJ_GRAPH_CENSUS
+ #define OBJ_GRAPH_CENSUS OBJ_GRAPH_PROFILE
+#endif
+
 #if OBJ_GRAPH_PROFILE
  #include <atomic>
  #include <chrono>
  #include <cstdio>
  #include <cstdlib>
+ #include <string>
+#endif
+
+#if OBJ_GRAPH_CENSUS
+ #include <algorithm>
+ #include <cstdlib>
+ #include <map>
+ #include <string>
+ #include <string>
+ #include <typeinfo>
+ #include <vector>
+ #include <cxxabi.h>
 #endif
 
 namespace tracktion::inline graph {
@@ -124,6 +145,100 @@ namespace node_player_utils
         return numCycles > 0;
     }
 
+   #if OBJ_GRAPH_CENSUS
+    /** Nom lisible d'un type C++ (les noms bruts de typeid sont encodés). */
+    static inline std::string objDemangle (const char* mangled)
+    {
+        int status = 0;
+
+        if (char* readable = abi::__cxa_demangle (mangled, nullptr, nullptr, &status))
+        {
+            std::string result (readable);
+            std::free (readable);
+
+            // On enlève le préfixe d'espace de noms, sans intérêt ici et très verbeux.
+            if (const auto lastColon = result.rfind ("::"); lastColon != std::string::npos)
+                result.erase (0, lastColon + 2);
+
+            return result;
+        }
+
+        return std::string (mangled);
+    }
+
+    using ObjNodeCensus = std::map<std::string, int>;
+
+    /** Compte les nœuds par type concret. */
+    static inline ObjNodeCensus objCensusNodes (const std::vector<Node*>& orderedNodes)
+    {
+        ObjNodeCensus census;
+
+        for (auto* n : orderedNodes)
+            if (n != nullptr)
+                ++census[objDemangle (typeid (*n).name())];
+
+        return census;
+    }
+
+    /** Recensement complet, du type le plus nombreux au moins nombreux. */
+    static inline std::string objFormatCensus (const ObjNodeCensus& census)
+    {
+        std::vector<std::pair<std::string, int>> byCount (census.begin(), census.end());
+        std::sort (byCount.begin(), byCount.end(),
+                   [] (const auto& a, const auto& b)
+                   {
+                       if (a.second != b.second)
+                           return a.second > b.second;
+
+                       return a.first < b.first;
+                   });
+
+        std::string line = "[GRAPH]   types:";
+
+        for (const auto& [name, count] : byCount)
+            line += " " + std::to_string (count) + "x " + name + ",";
+
+        if (! byCount.empty())
+            line.pop_back();
+
+        return line + "\n";
+    }
+
+    /** Uniquement ce qui a changé depuis la reconstruction précédente : c'est là
+        que se lisent les nœuds ajoutés par un objet, un plugin ou un groupe.
+    */
+    static inline std::string objFormatCensusDelta (const ObjNodeCensus& previous,
+                                                    const ObjNodeCensus& current,
+                                                    int previousIndex)
+    {
+        ObjNodeCensus deltas;
+
+        for (const auto& [name, count] : current)
+            if (const auto it = previous.find (name); it == previous.end() || it->second != count)
+                deltas[name] = count - (it == previous.end() ? 0 : it->second);
+
+        for (const auto& [name, count] : previous)
+            if (current.find (name) == current.end())
+                deltas[name] = -count;
+
+        if (deltas.empty())
+            return "[GRAPH]   delta vs #" + std::to_string (previousIndex) + ": aucun changement de type\n";
+
+        int total = 0;
+        std::string line = "[GRAPH]   delta vs #" + std::to_string (previousIndex) + ":";
+
+        for (const auto& [name, count] : deltas)
+        {
+            total += count;
+            line += (count > 0 ? " +" : " ") + std::to_string (count) + " " + name + ",";
+        }
+
+        line.pop_back();
+
+        return line + "  (total " + (total > 0 ? "+" : "") + std::to_string (total) + ")\n";
+    }
+   #endif
+
     /** Prepares a specific Node to be played and returns all the Nodes. */
     static std::unique_ptr<NodeGraph> prepareToPlay (std::unique_ptr<Node> node, NodeGraph* oldGraph,
                                                      double sampleRate, int blockSize,
@@ -189,8 +304,28 @@ namespace node_player_utils
                 ms (objT2, objT3),
                 ms (objT3, objT4));
 
+            std::string objText (objLine);
+
+           #if OBJ_GRAPH_CENSUS
+            // Mesuré après objT4 : ce recensement ne compte dans aucune des durées.
+            {
+                static ObjNodeCensus objPreviousCensus;
+                static int objPreviousIndex = 0;
+
+                const auto census = objCensusNodes (nodeGraph->orderedNodes);
+
+                objText += objFormatCensus (census);
+
+                if (objPreviousIndex != 0)
+                    objText += objFormatCensusDelta (objPreviousCensus, census, objPreviousIndex);
+
+                objPreviousCensus = census;
+                objPreviousIndex = objRebuildIndex;
+            }
+           #endif
+
             // Console Xcode
-            std::fputs (objLine, stderr);
+            std::fputs (objText.c_str(), stderr);
             std::fflush (stderr);
 
             // ...et un fichier, pour que la mesure survive à un lancement hors Xcode.
@@ -202,7 +337,7 @@ namespace node_player_utils
 
                 if (auto* f = std::fopen (objPath, objRebuildIndex == 1 ? "w" : "a"))
                 {
-                    std::fputs (objLine, f);
+                    std::fputs (objText.c_str(), f);
                     std::fclose (f);
                 }
             }
