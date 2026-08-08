@@ -204,7 +204,14 @@ void ContainerClipNode::process (ProcessContext& pc)
     // readers des WaveNode (bloc de silence + fade, cf. tracktion_WaveNode.cpp) juste à l'entrée
     // du groupe — soit les premières ms perdues. Ce que le saut aurait purgé — les FIFOs de
     // latence — l'est déjà par le pré-roll de ContainerClip::getHead().
-    if (editPlayHeadState.isContiguousWithPreviousBlock())
+    //
+    // Même raison de ne PAS passer par isContiguousWithPreviousBlock(), qui est faux au bouclage
+    // de l'Edit (in/out du transport) alors que rien n'a sauté : le début de la boucle partait
+    // au silence à chaque tour. Les deux fonctions ne diffèrent que par ce drapeau —
+    // setPosition() == overridePosition() + userInteraction() — donc la position atterrit au même
+    // endroit dans les deux cas. C'est d'ailleurs ce que fait WaveNode lui-même, qui exempte
+    // explicitement isFirstBlockOfLoop() de sa purge.
+    if (! editPlayHeadState.didPlayheadJump())
         localPlayHead.overridePosition (newPosition);
     else
         localPlayHead.setPosition (newPosition);
