@@ -66,13 +66,12 @@ struct CombiningNode::TimedNode
     {
         auto info2 = info;
 
+        info2.deallocateAudioBuffer = nullptr;
+
         // Patch local Objekat — le buffer unique partagé par toute la chaîne ne vaut que pour
         // une chaîne LINÉAIRE, où chaque nœud traite sur place le résultat du précédent. Dès
         // qu'un nœud a plusieurs entrées (bloc de plugins parallèles → SummingNode), les
         // branches écriraient toutes dans la même vue et s'écraseraient avant d'être sommées.
-        // Dans ce cas on laisse chaque nœud allouer son propre buffer : on perd le gain
-        // mémoire du partage, uniquement pour les clips qui ont réellement une chaîne
-        // parallèle. `view` reste la destination du CombiningNode, inchangée.
         if (isLinearChain)
         {
             info2.allocateAudioBuffer = [view] (choc::buffer::Size size) -> tracktion::graph::NodeBuffer
@@ -82,16 +81,38 @@ struct CombiningNode::TimedNode
 
                                             return { view.getFirstChannels (size.numChannels), {} };
                                         };
-            info2.deallocateAudioBuffer = nullptr;
-        }
-        else
-        {
-            info2.allocateAudioBuffer = nullptr;
-            info2.deallocateAudioBuffer = nullptr;
+
+            for (auto n : nodesToProcess)
+                n->initialise (info2);
+
+            return;
         }
 
-        for (auto n : nodesToProcess)
-            n->initialise (info2);
+        // Un buffer par nœud. N.B. il ne suffit PAS de laisser chaque nœud allouer le sien :
+        // beaucoup déclarent ClearBuffers::no (ContainerClipNode, FadeInOutNode, LatencyNode,
+        // les mesureurs…) parce que dans le montage partagé c'est le CombiningNode qui vide.
+        // Un buffer jamais vidé s'additionne bloc après bloc — larsen. On reprend donc le
+        // contrat à notre compte : on fournit les buffers, on les vide (@see process).
+        //
+        // Dimensionnés comme `view`, qui couvre déjà le plus large des nœuds — c'est ce
+        // qu'affirmait le jassert du chemin partagé. Alloué ici, jamais sur le thread audio.
+        ownedBuffers.resize (nodesToProcess.size());
+
+        for (size_t i = 0; i < nodesToProcess.size(); ++i)
+        {
+            auto* buffer = &ownedBuffers[i];
+            buffer->resize (view.getSize());
+
+            info2.allocateAudioBuffer = [buffer] (choc::buffer::Size size) -> tracktion::graph::NodeBuffer
+                                        {
+                                            jassert (size.numFrames == buffer->getSize().numFrames);
+                                            jassert (size.numChannels <= buffer->getSize().numChannels);
+
+                                            return { buffer->getView().getFirstChannels (size.numChannels), {} };
+                                        };
+
+            nodesToProcess[i]->initialise (info2);
+        }
     }
 
     bool isReadyToProcess() const
@@ -121,6 +142,12 @@ struct CombiningNode::TimedNode
         jassert (hasPrefetched);
        #endif
 
+        // Patch local Objekat — vide ce qu'on a fourni, comme le CombiningNode le fait pour le
+        // buffer partagé : les nœuds en ClearBuffers::no comptent dessus. Vide en chaîne série,
+        // où les nœuds partagent le buffer du CombiningNode. @see prepareToPlay
+        for (auto& b : ownedBuffers)
+            b.clear();
+
         // Process all the Nodes
         for (auto n : nodesToProcess)
             n->process (pc.numSamples, pc.referenceSampleRange);
@@ -148,6 +175,10 @@ struct CombiningNode::TimedNode
         for (auto n : nodesToProcess)
             size += n->getAllocatedBytes();
 
+        // Les nœuds n'allouent pas ces buffers-là, ils les reçoivent : à nous de les compter.
+        for (const auto& b : ownedBuffers)
+            size += b.getView().data.getBytesNeeded (b.getSize());
+
         return size;
     }
 
@@ -156,6 +187,8 @@ struct CombiningNode::TimedNode
 private:
     const std::unique_ptr<Node> node;
     std::vector<Node*> nodesToProcess, leafNodes;
+    // Vide en chaîne série : les nœuds partagent alors le buffer du CombiningNode.
+    std::vector<choc::buffer::ChannelArrayBuffer<float>> ownedBuffers;
     bool isLinearChain = true;
 
     /** Relève les feuilles — les seules dont la disponibilité dépende de l'extérieur, tous les
