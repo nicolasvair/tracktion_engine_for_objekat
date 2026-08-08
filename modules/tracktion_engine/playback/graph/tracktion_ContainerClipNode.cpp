@@ -197,17 +197,14 @@ void ContainerClipNode::process (ProcessContext& pc)
     if (localPlayHead.isLooping())
         newPosition = localPlayHead.linearPositionToLoopPosition (newPosition, localPlayHead.getLoopRange());
 
-    // Réactivation après une période hors fenêtre : le CombiningNode ne nous a pas appelés
-    // pendant que le clip était hors du bloc, donc nos blocs à nous ne se suivent pas — même
-    // quand ceux de l'Edit se suivent. Sans ce test on prendrait overridePosition() et le
-    // graphe interne ne verrait aucun saut : notes MIDI suspendues, FIFOs de plugins pleines
-    // de matériau périmé. setPosition() marque l'interaction, PlayHeadState local propage le
-    // saut, et les nœuds internes se remettent d'aplomb (cf. PluginNode : all-notes-off sur
-    // didPlayheadJump).
-    const bool contiguousForUs = lastProcessedReferenceSampleEnd == pc.referenceSampleRange.getStart();
-    lastProcessedReferenceSampleEnd = pc.referenceSampleRange.getEnd();
-
-    if (contiguousForUs && editPlayHeadState.isContiguousWithPreviousBlock())
+    // N.B. on suit la contiguïté de l'EDIT, pas la nôtre. Hors fenêtre le CombiningNode ne nous
+    // appelle pas, donc nos blocs à nous ne se suivent pas — tentant d'en faire un saut pour que
+    // le graphe interne se réinitialise. À ne pas faire : les nœuds internes lisent par position
+    // absolue, ils n'ont pas besoin du saut pour se placer, et le signaler ferait flusher les
+    // readers des WaveNode (bloc de silence + fade, cf. tracktion_WaveNode.cpp) juste à l'entrée
+    // du groupe — soit les premières ms perdues. Ce que le saut aurait purgé — les FIFOs de
+    // latence — l'est déjà par le pré-roll de ContainerClip::getHead().
+    if (editPlayHeadState.isContiguousWithPreviousBlock())
         localPlayHead.overridePosition (newPosition);
     else
         localPlayHead.setPosition (newPosition);

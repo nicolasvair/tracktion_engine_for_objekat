@@ -114,8 +114,11 @@ void PluginNode::prepareToPlay (const tracktion::graph::PlaybackInitialisationIn
 
     auto props = getNodeProperties();
 
-    if (props.latencyNumSamples > 0)
-        automationAdjustmentTime = TimeDuration::fromSamples (-props.latencyNumSamples, sampleRate);
+    // Patch local Objekat — `readAheadNumSamples` compense l'avance de lecture d'un
+    // ContainerClip auto-compensé, où le matériau du bloc `t` appartient à `t + L - Lc`
+    // et non à `t - Lc`. Vaut 0 partout ailleurs. @see setReadAheadNumSamples
+    if (const auto adjustment = readAheadNumSamples - props.latencyNumSamples; adjustment != 0)
+        automationAdjustmentTime = TimeDuration::fromSamples (adjustment, sampleRate);
 
     if (shouldUseFineGrainAutomation (*plugin))
         subBlockSizeToUse = std::max (128, 128 * juce::roundToInt (info.sampleRate / 44100.0));

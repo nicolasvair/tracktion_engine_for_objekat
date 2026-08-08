@@ -143,13 +143,13 @@ CombiningNode::CombiningNode (EditItemID id, ProcessState& ps)
 
 CombiningNode::~CombiningNode() {}
 
-void CombiningNode::addInput (std::unique_ptr<Node> input, TimeRange time)
+void CombiningNode::addInput (std::unique_ptr<Node> input, TimeRange time, bool ignoreLatency)
 {
     jassert (time.getEnd() <= Edit::getMaximumEditEnd());
-    addInput (std::move (input), toBeats (*getProcessState().getTempoSequence(), time));
+    addInput (std::move (input), toBeats (*getProcessState().getTempoSequence(), time), ignoreLatency);
 }
 
-void CombiningNode::addInput (std::unique_ptr<Node> input, BeatRange beatRange)
+void CombiningNode::addInput (std::unique_ptr<Node> input, BeatRange beatRange, bool ignoreLatency)
 {
     assert (input != nullptr);
 
@@ -161,7 +161,13 @@ void CombiningNode::addInput (std::unique_ptr<Node> input, BeatRange beatRange)
     nodeProperties.hasAudio |= props.hasAudio;
     nodeProperties.hasMidi |= props.hasMidi;
     nodeProperties.numberOfChannels = std::max (nodeProperties.numberOfChannels, props.numberOfChannels);
-    nodeProperties.latencyNumSamples = std::max (nodeProperties.latencyNumSamples, props.latencyNumSamples);
+    // Patch local Objekat — une entrée qui compense elle-même sa latence (@see
+    // Clip::compensatesOwnPluginLatency) est déjà alignée : elle lit son matériau en avance de
+    // ce que sa chaîne retarde. Remonter sa latence la ferait compenser une deuxième fois, et
+    // surtout elle contaminerait toute la piste.
+    if (! ignoreLatency)
+        nodeProperties.latencyNumSamples = std::max (nodeProperties.latencyNumSamples, props.latencyNumSamples);
+
     hash_combine (nodeProperties.nodeID, props.nodeID);
 
    #if USE_PARTITION_INSERTION

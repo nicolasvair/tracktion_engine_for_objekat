@@ -33,7 +33,7 @@ public:
 
         Any nodes passed-in will be deleted by this node when required.
     */
-    void addInput (std::unique_ptr<Node>, TimeRange);
+    void addInput (std::unique_ptr<Node>, TimeRange, bool ignoreLatency = false);
 
     /** Adds an input node to be played at a given beat range.
 
@@ -42,7 +42,7 @@ public:
 
         Any nodes passed-in will be deleted by this node when required.
     */
-    void addInput (std::unique_ptr<Node>, BeatRange);
+    void addInput (std::unique_ptr<Node>, BeatRange, bool ignoreLatency = false);
 
     /** Returns the number of inputs added. */
     int getNumInputs() const;

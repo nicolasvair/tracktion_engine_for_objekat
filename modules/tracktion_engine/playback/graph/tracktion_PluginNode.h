@@ -48,6 +48,23 @@ public:
     //==============================================================================
     Plugin& getPlugin()                                 { return *plugin; }
 
+    /** Patch local Objekat — avance de lecture appliquée en amont de ce nœud, en samples.
+
+        Le temps d'edit passé au plugin est normalement reculé de la latence cumulée en
+        amont : dans une piste, un plugin derrière une latence de Lc traite bien du
+        matériau vieux de Lc, donc il doit lire son automation à `t - Lc`.
+
+        Ça cesse d'être vrai dans la chaîne d'un ContainerClip auto-compensé : celui-ci
+        lit son contenu avec L d'avance, si bien qu'au bloc `t` le matériau appartient
+        réellement à `t + L - Lc`. Sans cette correction, le décalage n'est pas qu'une
+        dérive d'automation — un plugin qui se sert de `PluginRenderContext::editTime`
+        comme d'une porte (la fenêtre de groupe d'Objekat) coupe alors les L premiers
+        samples du groupe.
+
+        À appeler avant initialise(). @see Clip::compensatesOwnPluginLatency
+    */
+    void setReadAheadNumSamples (int numSamples)        { readAheadNumSamples = numSamples; }
+
     tracktion::graph::NodeProperties getNodeProperties() override;
     std::vector<Node*> getDirectInputNodes() override   { return { input.get() }; }
     bool isReadyToProcess() override                    { return input->hasProcessed(); }
@@ -71,6 +88,7 @@ private:
     tracktion::engine::MidiMessageArray midiMessageArray;
     int subBlockSizeToUse = -1;
     bool balanceLatency = true, canProcessBypassed = false;
+    int readAheadNumSamples = 0;
     TimeDuration automationAdjustmentTime;
 
     std::shared_ptr<tracktion::graph::LatencyProcessor> latencyProcessor;

@@ -867,16 +867,23 @@ std::unique_ptr<tracktion::graph::Node> createNodeForContainerClip (ContainerCli
                 p->initialiseFully();
 
             node = createPluginNodeForList (*pluginList, nullptr, std::move (node), params.processState.playHeadState, params);
+
+           #if ! USE_DYNAMIC_OFFSET_CONTAINER_CLIP
+            // Patch local Objekat — le ContainerClipNode lit son contenu avec L d'avance, donc
+            // au bloc `t` toute cette chaîne traite du matériau appartenant à `t`, pas à `t - L`.
+            // On l'annonce à chaque PluginNode pour qu'il corrige son temps d'edit ; sans quoi la
+            // fenêtre de groupe, qui s'en sert comme d'une porte, coupe les L premiers samples.
+            // Le parcours s'arrête au ContainerClipNode, qui n'expose pas d'entrées directes.
+            if (pluginLatencyNumSamples > 0)
+                visitNodes (*node,
+                            [pluginLatencyNumSamples] (auto& n)
+                            {
+                                if (auto pn = dynamic_cast<PluginNode*> (&n))
+                                    pn->setReadAheadNumSamples (pluginLatencyNumSamples);
+                            }, true);
+           #endif
         }
     }
-
-   #if ! USE_DYNAMIC_OFFSET_CONTAINER_CLIP
-    // La chaîne ci-dessus a bien retardé de L, mais le contenu a été lu avec L d'avance :
-    // vu du dehors, c'est aligné. On masque donc la latence, sinon elle serait compensée
-    // une seconde fois — et surtout elle remonterait au CombiningNode.
-    if (pluginLatencyNumSamples > 0)
-        node = makeNode<LatencyMaskingNode> (std::move (node));
-   #endif
 
     // Create FadeInOutNode
     if (role != ClipRole::launcher)
@@ -980,7 +987,7 @@ std::unique_ptr<tracktion::graph::Node> createNodeForClips (EditItemID trackID, 
                 auto timeRange = clip->getPosition().time;
                 timeRange = timeRange.withStart (timeRange.getStart() - clip->getHead())
                                      .withEnd (timeRange.getEnd() + clip->getTail());
-                combiner->addInput (std::move (clipNode), timeRange);
+                combiner->addInput (std::move (clipNode), timeRange, clip->compensatesOwnPluginLatency());
             }
 
             return combiner;
@@ -991,6 +998,7 @@ std::unique_ptr<tracktion::graph::Node> createNodeForClips (EditItemID trackID, 
     {
         std::unique_ptr<Node> node;
         TimeRange timeRange;
+        bool ignoreLatency = false;
     };
 
     std::vector<ClipNodeEntry> clipEntries;
@@ -1002,7 +1010,7 @@ std::unique_ptr<tracktion::graph::Node> createNodeForClips (EditItemID trackID, 
                 auto timeRange = clip->getPosition().time;
                 timeRange = timeRange.withStart (timeRange.getStart() - clip->getHead())
                                      .withEnd (timeRange.getEnd() + clip->getTail());
-                clipEntries.push_back ({ std::move (clipNode), timeRange });
+                clipEntries.push_back ({ std::move (clipNode), timeRange, clip->compensatesOwnPluginLatency() });
             }
 
     // Extract nodes, match channels, then put back
@@ -1018,7 +1026,7 @@ std::unique_ptr<tracktion::graph::Node> createNodeForClips (EditItemID trackID, 
     auto combiner = std::make_unique<CombiningNode> (trackID, params.processState);
 
     for (auto& e : clipEntries)
-        combiner->addInput (std::move (e.node), e.timeRange);
+        combiner->addInput (std::move (e.node), e.timeRange, e.ignoreLatency);
 
     return combiner;
 }

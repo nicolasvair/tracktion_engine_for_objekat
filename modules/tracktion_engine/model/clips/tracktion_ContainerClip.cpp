@@ -72,10 +72,15 @@ double ContainerClip::getPluginLatencySeconds() const
 
     // getPluginList() n'existe qu'en version non-const dans Clip ; le calcul, lui, ne
     // modifie rien.
+    //
+    // N.B. ne PAS filtrer sur isEnabled() : PluginNode::getNodeProperties() ajoute la latence
+    // sans regarder l'état d'activation, et un plugin externe bypassé retarde quand même le
+    // signal via son latencyProcessor (canProcessBypassed). Filtrer ici sous-estimerait L, et
+    // le container serait retardé sans lecture anticipée ni pré-roll : en phase grâce à la PDC
+    // globale, mais amputé de ses L premières secondes.
     if (auto pluginList = const_cast<ContainerClip*> (this)->getPluginList())
         for (auto p : *pluginList)
-            if (p->isEnabled())
-                latency += std::max (0.0, p->getLatencySeconds());
+            latency += std::max (0.0, p->getLatencySeconds());
 
     return latency;
 }
