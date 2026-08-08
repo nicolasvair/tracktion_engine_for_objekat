@@ -373,6 +373,85 @@ std::unique_ptr<Node> createInsertReturnNode (InsertPlugin&, tracktion::graph::P
 
 //==============================================================================
 //==============================================================================
+/** Patch local Objekat — met à zéro les N premiers échantillons qui suivent une reprise de
+    traitement non contiguë.
+
+    Purger la FIFO d'un plugin à latence n'est pas silencieux : ce qu'on en chasse, c'est la
+    queue de l'activation précédente, et elle sortirait telle quelle AVANT le clip. Mais elle
+    n'est pas toujours illégitime — en boucle, elle EST le raccord attendu. Le critère n'est
+    donc pas la position dans l'Edit, c'est la continuité : la sortie d'une chaîne à latence
+    N ne vaut qu'après N échantillons de traitement contigu.
+
+    « Contigu » se lit sur les échantillons de référence, pas sur le temps d'edit : un bouclage
+    y est contigu (@see PlayHeadState::didPlayheadJump, distinct de isFirstBlockOfLoop), et
+    c'est bien ce qu'on veut, la chaîne ayant traité sans interruption de part et d'autre du
+    raccord. Un saut de tête de lecture, un stop/start ou un bloc sauté (le CombiningNode ne
+    traite ses entrées que dans leur fenêtre) réamorcent au contraire le compte.
+*/
+class LatencyPrimingNode final : public Node,
+                                 public TracktionEngineNode
+{
+public:
+    LatencyPrimingNode (std::unique_ptr<Node> inputNode, ProcessState& ps, int numSamplesToPrime)
+        : TracktionEngineNode (ps),
+          input (std::move (inputNode)),
+          samplesToPrime (numSamplesToPrime)
+    {
+        setOptimisations ({ tracktion::graph::ClearBuffers::no,
+                            tracktion::graph::AllocateAudioBuffer::yes });
+    }
+
+    tracktion::graph::NodeProperties getNodeProperties() override
+    {
+        auto props = input->getNodeProperties();
+
+        constexpr size_t magicHash = size_t (0x9a7c1e5b3d240f11);
+
+        if (props.nodeID != 0)
+            hash_combine (props.nodeID, magicHash);
+
+        return props;
+    }
+
+    std::vector<Node*> getDirectInputNodes() override    { return { input.get() }; }
+    bool isReadyToProcess() override                     { return input->hasProcessed(); }
+
+    void process (ProcessContext& pc) override
+    {
+        auto sourceBuffers = input->getProcessedOutput();
+
+        if (pc.referenceSampleRange.getStart() != nextExpectedReferenceSample
+             || getPlayHeadState().didPlayheadJump())
+            samplesRemaining = samplesToPrime;
+
+        nextExpectedReferenceSample = pc.referenceSampleRange.getEnd();
+
+        pc.buffers.midi.copyFrom (sourceBuffers.midi);
+
+        if (samplesRemaining <= 0)
+        {
+            // Amorçage terminé : nœud passant, aucune copie.
+            setAudioOutput (input.get(), sourceBuffers.audio);
+            return;
+        }
+
+        graph::copyIfNotAliased (pc.buffers.audio, sourceBuffers.audio);
+
+        const auto numToClear = std::min ((choc::buffer::FrameCount) samplesRemaining,
+                                          pc.buffers.audio.getNumFrames());
+        pc.buffers.audio.getStart (numToClear).clear();
+        samplesRemaining -= (int) numToClear;
+    }
+
+private:
+    const std::unique_ptr<Node> input;
+    const int samplesToPrime;
+    int samplesRemaining = 0;
+    int64_t nextExpectedReferenceSample = std::numeric_limits<int64_t>::min();
+};
+
+//==============================================================================
+//==============================================================================
 std::unique_ptr<tracktion::graph::Node> createFadeNodeForClip (AudioClipBase& clip, EditTimeRange clipTimeRangeToUse,
                                                                std::unique_ptr<Node> node, const CreateNodeParams& params)
 {
@@ -988,32 +1067,19 @@ std::unique_ptr<tracktion::graph::Node> createNodeForClips (EditItemID trackID, 
             tail = std::max (tail, TimeDuration::fromSeconds (laneLatencySeconds * 2.0));
         }
 
-        // Bâillon sur le pré-roll. La purge des FIFOs n'est pas silencieuse : ce qu'on en
-        // chasse, c'est la queue de l'activation PRÉCÉDENTE, et elle sort telle quelle avant le
-        // clip. À rejouer deux fois le même endroit, on entend la queue du passage d'avant
-        // arriver AVANT le clip.
+        // Bâillon d'amorçage : la sortie de la chaîne ne vaut qu'après autant d'échantillons de
+        // traitement contigu que sa latence. Avant ça, c'est la queue de l'activation
+        // précédente qui sort. @see LatencyPrimingNode
         //
-        // Le premier échantillon utile sort de la chaîne à `début + latence reportée vers
-        // l'extérieur` : la latence de la lane pour un clip ordinaire (la PDC globale ramène
-        // ensuite la piste en phase), zéro pour un ContainerClip, qui lit en avance. Tout ce
-        // qui précède est du résidu, et n'a donc qu'à être mis à zéro.
-        const auto gateOffset = clip.compensatesOwnPluginLatency() ? 0_td
-                                                                   : TimeDuration::fromSeconds (laneLatencySeconds);
+        // Ce qu'il faut amorcer, c'est ce que le clip retarde en propre — pour un ContainerClip
+        // sa chaîne interne, qu'il compense par lecture anticipée mais dont les FIFOs sont bien
+        // là ; pour un clip ordinaire sa chaîne plus le rembourrage d'égalisation, c'est-à-dire
+        // la latence de la lane.
+        const auto primeSeconds = clip.compensatesOwnPluginLatency() ? clip.getPluginLatencySeconds()
+                                                                     : std::max (laneLatencySeconds, clip.getPluginLatencySeconds());
 
-        if (gateOffset > 0_td || clip.getPluginLatencySeconds() > 0.0)
-        {
-            const auto gateEnd = timeRange.getStart() + gateOffset;
-
-            // Fondus vides : seul `clearSamplesOutsideFade` nous intéresse. Le fondu de sortie
-            // est repoussé à la fin de l'Edit pour ne rien couper de la queue, qui elle est
-            // légitime — et FadeInOutNode::renderingNeeded rend alors le nœud passant une fois
-            // le bâillon franchi.
-            clipNode = makeNode<FadeInOutNode> (std::move (clipNode), params.processState,
-                                                TimeRange (gateEnd, gateEnd),
-                                                TimeRange (Edit::getMaximumEditEnd(), Edit::getMaximumEditEnd()),
-                                                AudioFadeCurve::linear, AudioFadeCurve::linear,
-                                                true);
-        }
+        if (const auto primeSamples = juce::roundToInt (primeSeconds * params.sampleRate); primeSamples > 0)
+            clipNode = makeNode<LatencyPrimingNode> (std::move (clipNode), params.processState, primeSamples);
 
         return { std::move (clipNode),
                  timeRange.withStart (timeRange.getStart() - head)
