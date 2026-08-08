@@ -988,6 +988,33 @@ std::unique_ptr<tracktion::graph::Node> createNodeForClips (EditItemID trackID, 
             tail = std::max (tail, TimeDuration::fromSeconds (laneLatencySeconds * 2.0));
         }
 
+        // Bâillon sur le pré-roll. La purge des FIFOs n'est pas silencieuse : ce qu'on en
+        // chasse, c'est la queue de l'activation PRÉCÉDENTE, et elle sort telle quelle avant le
+        // clip. À rejouer deux fois le même endroit, on entend la queue du passage d'avant
+        // arriver AVANT le clip.
+        //
+        // Le premier échantillon utile sort de la chaîne à `début + latence reportée vers
+        // l'extérieur` : la latence de la lane pour un clip ordinaire (la PDC globale ramène
+        // ensuite la piste en phase), zéro pour un ContainerClip, qui lit en avance. Tout ce
+        // qui précède est du résidu, et n'a donc qu'à être mis à zéro.
+        const auto gateOffset = clip.compensatesOwnPluginLatency() ? 0_td
+                                                                   : TimeDuration::fromSeconds (laneLatencySeconds);
+
+        if (gateOffset > 0_td || clip.getPluginLatencySeconds() > 0.0)
+        {
+            const auto gateEnd = timeRange.getStart() + gateOffset;
+
+            // Fondus vides : seul `clearSamplesOutsideFade` nous intéresse. Le fondu de sortie
+            // est repoussé à la fin de l'Edit pour ne rien couper de la queue, qui elle est
+            // légitime — et FadeInOutNode::renderingNeeded rend alors le nœud passant une fois
+            // le bâillon franchi.
+            clipNode = makeNode<FadeInOutNode> (std::move (clipNode), params.processState,
+                                                TimeRange (gateEnd, gateEnd),
+                                                TimeRange (Edit::getMaximumEditEnd(), Edit::getMaximumEditEnd()),
+                                                AudioFadeCurve::linear, AudioFadeCurve::linear,
+                                                true);
+        }
+
         return { std::move (clipNode),
                  timeRange.withStart (timeRange.getStart() - head)
                           .withEnd (timeRange.getEnd() + tail) };
