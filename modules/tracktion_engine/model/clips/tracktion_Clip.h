@@ -198,25 +198,45 @@ public:
     /** Returns the maximum length this clip can have. */
     virtual TimeDuration getMaximumLength()               { return toDuration (Edit::getMaximumEditEnd()); }
 
-    /** Returns extra time before the clip start that needs processing (e.g., ARA head time). */
-    virtual TimeDuration getHead() const                  { return {}; }
+    /** Patch local Objekat — latence totale de la PluginList de CE clip, en secondes.
 
-    /** Returns extra time after the clip end that needs processing (e.g., ARA tail time). */
-    virtual TimeDuration getTail() const                  { return {}; }
+        N.B. ne PAS filtrer sur isEnabled() : PluginNode::getNodeProperties() ajoute la latence
+        sans regarder l'état d'activation, et un plugin externe bypassé retarde quand même le
+        signal via son latencyProcessor (canProcessBypassed). Sous-estimer L, c'est étendre la
+        fenêtre d'activation trop court et amputer le clip de son début.
+    */
+    double getPluginLatencySeconds() const;
+
+    /** Returns extra time before the clip start that needs processing (e.g., ARA head time).
+
+        Patch local Objekat — inclut le pré-roll de la chaîne du clip. Le CombiningNode ne
+        traite pas ses entrées en continu : sans ce pré-roll, un plugin à latence entrerait en
+        jeu avec ses FIFOs encore pleines du résidu de l'activation précédente. Pendant ces L
+        secondes le clip pousse du silence dans sa chaîne, ce qui les purge.
+        @see createNodeForClips
+    */
+    virtual TimeDuration getHead() const;
+
+    /** Returns extra time after the clip end that needs processing (e.g., ARA tail time).
+
+        Patch local Objekat — ×2 sur la latence de la chaîne : L pour vider les FIFOs, L de
+        marge pour ce que la latence déclarée ne dit pas (queues courtes de reverb/delay).
+    */
+    virtual TimeDuration getTail() const;
 
     /** Patch local Objekat — le clip compense lui-même la latence de sa propre PluginList.
 
-        Par défaut false : un plugin à latence sur une plugin-list de clip force toute la piste
-        à retomber du CombiningNode vers un SummingNode (cf. createNodeForClips), parce que le
-        CombiningNode ne processe pas en continu et que les FIFOs de latence ne seraient jamais
-        vidés. C'est la paresse qui saute, donc l'objectif même de cette branche.
+        Par défaut false : le clip déclare sa latence normalement et la PDC globale l'aligne,
+        comme n'importe quelle piste. C'est le bon comportement pour un clip ordinaire.
 
-        Un clip qui renvoie true garantit deux choses :
-          - il aligne sa sortie tout seul (lecture anticipée du matériau de L samples), donc il
-            reporte une latence NULLE vers l'extérieur ;
-          - il étend sa fenêtre d'activation via getHead()/getTail() d'au moins L, pour que les
-            FIFOs se remplissent avant le clip et se vident après.
-        Le fallback SummingNode peut alors l'ignorer. @see ContainerClip.
+        Un clip qui renvoie true garantit à la place :
+          - qu'il aligne sa sortie tout seul, en lisant son matériau L samples en avance, et
+            reporte donc une latence NULLE vers l'extérieur ;
+          - que le temps d'edit vu par sa chaîne est corrigé de +L en conséquence.
+        C'est ce que fait un ContainerClip, pour que la latence d'un groupe ne remonte pas au
+        CombiningNode de la piste. @see ContainerClip, PluginNode::setReadAheadNumSamples.
+
+        Dans les deux cas getHead()/getTail() élargissent la fenêtre d'activation.
     */
     virtual bool compensatesOwnPluginLatency() const      { return false; }
 

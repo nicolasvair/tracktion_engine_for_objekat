@@ -1191,8 +1191,10 @@ void AudioClipBase::selectionStatusChanged (bool isNowSelected)
    #endif
 }
 
-TimeDuration AudioClipBase::getHead() const  { return araProxy != nullptr ? araProxy->getHead() : TimeDuration(); }
-TimeDuration AudioClipBase::getTail() const  { return araProxy != nullptr ? araProxy->getTail() : TimeDuration(); }
+// Patch local Objekat — la marge ARA s'ajoute à celle de la chaîne de plugins du clip
+// (Clip::getHead/getTail), elle ne la remplace pas : les deux besoins sont indépendants.
+TimeDuration AudioClipBase::getHead() const  { return Clip::getHead() + (araProxy != nullptr ? araProxy->getHead() : TimeDuration()); }
+TimeDuration AudioClipBase::getTail() const  { return Clip::getTail() + (araProxy != nullptr ? araProxy->getTail() : TimeDuration()); }
 
 void AudioClipBase::loadARAState()
 {

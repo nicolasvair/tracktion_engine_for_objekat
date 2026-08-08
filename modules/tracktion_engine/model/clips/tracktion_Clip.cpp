@@ -416,6 +416,29 @@ void Clip::setOffset (TimeDuration newOffset)
     setPosition (pos);
 }
 
+// Patch local Objekat — @see Clip::getPluginLatencySeconds pour le détail.
+double Clip::getPluginLatencySeconds() const
+{
+    double latency = 0.0;
+
+    // getPluginList() n'existe qu'en version non-const ; le calcul, lui, ne modifie rien.
+    if (auto pluginList = const_cast<Clip*> (this)->getPluginList())
+        for (auto p : *pluginList)
+            latency += std::max (0.0, p->getLatencySeconds());
+
+    return latency;
+}
+
+TimeDuration Clip::getHead() const
+{
+    return TimeDuration::fromSeconds (getPluginLatencySeconds());
+}
+
+TimeDuration Clip::getTail() const
+{
+    return TimeDuration::fromSeconds (getPluginLatencySeconds() * 2.0);
+}
+
 juce::Array<TimePosition> Clip::getInterestingTimes()
 {
     juce::Array<TimePosition> times;

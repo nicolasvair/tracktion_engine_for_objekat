@@ -63,19 +63,11 @@ public:
     HashCode getHash() const override;
 
     //==============================================================================
-    /** Patch local Objekat — latence totale, en secondes, de la chaîne de plugins du container.
-
-        Somme des latences des plugins en série. C'est le L de la compensation : le
-        ContainerClipNode lit son contenu L secondes en avance pour que la sortie, retardée
-        d'autant par la chaîne, retombe alignée sur la timeline de l'Edit.
+    /** @internal Patch local Objekat — le container lit son contenu getPluginLatencySeconds()
+        en avance pour que la sortie, retardée d'autant par sa chaîne, retombe alignée sur la
+        timeline de l'Edit, et reporte donc une latence nulle vers l'extérieur.
+        getHead()/getTail() sont ceux de Clip. @see Clip::compensatesOwnPluginLatency
     */
-    double getPluginLatencySeconds() const;
-
-    /** @internal Marge avant le clip pour laisser les FIFOs de latence se remplir. */
-    TimeDuration getHead() const override;
-    /** @internal Marge après le clip pour laisser les queues (FIFOs, reverbs) se vider. */
-    TimeDuration getTail() const override;
-    /** @internal @see Clip::compensatesOwnPluginLatency */
     bool compensatesOwnPluginLatency() const override           { return true; }
 
     /** @internal */
