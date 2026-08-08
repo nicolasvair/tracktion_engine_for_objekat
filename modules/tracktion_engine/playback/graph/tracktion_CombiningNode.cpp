@@ -33,17 +33,24 @@ struct CombiningNode::TimedNode
     TimedNode (std::unique_ptr<Node> sourceNode, BeatRange t)
         : time (t), node (std::move (sourceNode))
     {
-        for (auto n = node.get();;)
+        // Patch local Objekat — DFS post-ordre dédupliqué au lieu d'une descente linéaire.
+        // L'original supposait un seul input par nœud (« This doesn't work with parallel
+        // input Nodes ») : un SummingNode dans la plugin-list d'un clip — c'est ce qu'est un
+        // bloc de plugins parallèles — le cassait net. Le post-ordre garantit qu'un nœud est
+        // processé après tous ses inputs, et la déduplication qu'un nœud partagé entre deux
+        // branches ne l'est qu'une fois.
+        nodesToProcess = tracktion::graph::getNodes (*node, tracktion::graph::VertexOrdering::postordering);
+
+        // Les feuilles sont les seules dont la disponibilité dépend de l'extérieur : tous les
+        // autres nœuds ont leurs inputs dans cette liste, processés avant eux.
+        for (auto n : nodesToProcess)
         {
-            nodesToProcess.insert (nodesToProcess.begin(), n);
-            auto inputNodes = n->getDirectInputNodes();
+            const auto numInputs = n->getDirectInputNodes().size();
 
-            if (inputNodes.empty())
-                break;
-
-            // This doesn't work with parallel input Nodes
-            assert (inputNodes.size() == 1);
-            n = inputNodes.front();
+            if (numInputs == 0)
+                leafNodes.push_back (n);
+            else if (numInputs > 1)
+                isLinearChain = false;
         }
     }
 
@@ -56,14 +63,30 @@ struct CombiningNode::TimedNode
                         choc::buffer::ChannelArrayView<float> view)
     {
         auto info2 = info;
-        info2.allocateAudioBuffer = [view] (choc::buffer::Size size) -> tracktion::graph::NodeBuffer
-                                    {
-                                        jassert (size.numFrames == view.getNumFrames());
-                                        jassert (size.numChannels <= view.getNumChannels());
 
-                                        return { view.getFirstChannels (size.numChannels), {} };
-                                    };
-        info2.deallocateAudioBuffer = nullptr;
+        // Patch local Objekat — le buffer unique partagé par toute la chaîne ne vaut que pour
+        // une chaîne LINÉAIRE, où chaque nœud traite sur place le résultat du précédent. Dès
+        // qu'un nœud a plusieurs entrées (bloc de plugins parallèles → SummingNode), les
+        // branches écriraient toutes dans la même vue et s'écraseraient avant d'être sommées.
+        // Dans ce cas on laisse chaque nœud allouer son propre buffer : on perd le gain
+        // mémoire du partage, uniquement pour les clips qui ont réellement une chaîne
+        // parallèle. `view` reste la destination du CombiningNode, inchangée.
+        if (isLinearChain)
+        {
+            info2.allocateAudioBuffer = [view] (choc::buffer::Size size) -> tracktion::graph::NodeBuffer
+                                        {
+                                            jassert (size.numFrames == view.getNumFrames());
+                                            jassert (size.numChannels <= view.getNumChannels());
+
+                                            return { view.getFirstChannels (size.numChannels), {} };
+                                        };
+            info2.deallocateAudioBuffer = nullptr;
+        }
+        else
+        {
+            info2.allocateAudioBuffer = nullptr;
+            info2.deallocateAudioBuffer = nullptr;
+        }
 
         for (auto n : nodesToProcess)
             n->initialise (info2);
@@ -71,7 +94,13 @@ struct CombiningNode::TimedNode
 
     bool isReadyToProcess() const
     {
-        return nodesToProcess.front()->isReadyToProcess();
+        // N.B. toutes les feuilles, pas seulement la première : une chaîne parallèle en a
+        // plusieurs, et une seule prête ne suffit pas.
+        for (auto n : leafNodes)
+            if (! n->isReadyToProcess())
+                return false;
+
+        return true;
     }
 
     void prefetchBlock (juce::Range<int64_t> referenceSampleRange)
@@ -124,7 +153,8 @@ struct CombiningNode::TimedNode
 
 private:
     const std::unique_ptr<Node> node;
-    std::vector<Node*> nodesToProcess;
+    std::vector<Node*> nodesToProcess, leafNodes;
+    bool isLinearChain = true;
    #if JUCE_DEBUG
     bool hasPrefetched = false;
    #endif
