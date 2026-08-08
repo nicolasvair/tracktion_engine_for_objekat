@@ -12,7 +12,18 @@
 // N.B. There are some limitations to this at the moment:
 // - Only works with audio clips
 // - Only works with WaveAudioClips which have setUsesProxy (false) on them
-#define USE_DYNAMIC_OFFSET_CONTAINER_CLIP 1
+//
+// Patch local Objekat : sélecteur de variante de nœud pour les ContainerClips.
+//   1 = DynamicOffsetNode : les clips enfants sont aplatis dans le graphe de l'Edit,
+//       avec un décalage temporel. Pas de graphe local, donc pas de PlayerContext.
+//   0 = ContainerClipNode : le container possède son propre PlayHead / ProcessState /
+//       player. C'est la variante dont dépendent les aux internes et les branches de
+//       plugins parallèles, et la seule qui donne la paresse recherchée (un groupe qui
+//       ne joue pas ne coûte rien).
+// Surchargeable depuis les réglages de build.
+#ifndef USE_DYNAMIC_OFFSET_CONTAINER_CLIP
+ #define USE_DYNAMIC_OFFSET_CONTAINER_CLIP 0
+#endif
 
 
 namespace tracktion::inline engine
