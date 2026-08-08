@@ -66,6 +66,35 @@ TimeDuration ContainerClip::getSourceLength() const
     return l;
 }
 
+double ContainerClip::getPluginLatencySeconds() const
+{
+    double latency = 0.0;
+
+    // getPluginList() n'existe qu'en version non-const dans Clip ; le calcul, lui, ne
+    // modifie rien.
+    if (auto pluginList = const_cast<ContainerClip*> (this)->getPluginList())
+        for (auto p : *pluginList)
+            if (p->isEnabled())
+                latency += std::max (0.0, p->getLatencySeconds());
+
+    return latency;
+}
+
+TimeDuration ContainerClip::getHead() const
+{
+    // Pré-roll : la chaîne doit tourner L avant le clip pour que ses FIFOs soient pleines
+    // au moment où le premier échantillon utile doit sortir.
+    return TimeDuration::fromSeconds (getPluginLatencySeconds());
+}
+
+TimeDuration ContainerClip::getTail() const
+{
+    // Queue : ×2 sur le tail. L pour purger les FIFOs de latence, L de marge pour ce que la
+    // latence déclarée ne dit pas (queues de reverb/delay courtes). C'est le comportement que
+    // le modèle à pistes donnait gratuitement, et que le container coupait net à sa borne.
+    return TimeDuration::fromSeconds (getPluginLatencySeconds() * 2.0);
+}
+
 HashCode ContainerClip::getHash() const
 {
     size_t hash = 0;

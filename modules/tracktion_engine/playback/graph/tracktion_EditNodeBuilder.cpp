@@ -842,12 +842,20 @@ std::unique_ptr<tracktion::graph::Node> createNodeForContainerClip (ContainerCli
     // Combiner clip and the contained clips need their own, local PlayHeadState.
     // This also needs to persist across graph rebuilds to maintain continuity.
     // Once the ContainerClipNode has been initialised it will update it's children with its own ProcessState
+    // Patch local Objekat — latence de la chaîne de plugins du container, compensée en
+    // interne par lecture anticipée pour que le CombiningNode de la piste n'ait rien à
+    // compenser et reste paresseux. @see Clip::compensatesOwnPluginLatency
+    const auto pluginLatencyNumSamples = params.includePlugins
+                                            ? juce::roundToInt (clip.getPluginLatencySeconds() * params.sampleRate)
+                                            : 0;
+
     auto node = makeNode<ContainerClipNode> (params.processState,
                                              clip.itemID,
                                              BeatRange (clip.getStartBeat(), clip.getEndBeat()),
                                              clip.getOffsetInBeats(),
                                              clip.getLoopRangeBeats(),
-                                             createNodeForClips (clip.itemID, clips, trackMuteState, params));
+                                             createNodeForClips (clip.itemID, clips, trackMuteState, params),
+                                             pluginLatencyNumSamples);
    #endif
 
     // Plugins
@@ -861,6 +869,14 @@ std::unique_ptr<tracktion::graph::Node> createNodeForContainerClip (ContainerCli
             node = createPluginNodeForList (*pluginList, nullptr, std::move (node), params.processState.playHeadState, params);
         }
     }
+
+   #if ! USE_DYNAMIC_OFFSET_CONTAINER_CLIP
+    // La chaîne ci-dessus a bien retardé de L, mais le contenu a été lu avec L d'avance :
+    // vu du dehors, c'est aligné. On masque donc la latence, sinon elle serait compensée
+    // une seconde fois — et surtout elle remonterait au CombiningNode.
+    if (pluginLatencyNumSamples > 0)
+        node = makeNode<LatencyMaskingNode> (std::move (node));
+   #endif
 
     // Create FadeInOutNode
     if (role != ClipRole::launcher)
@@ -904,10 +920,11 @@ std::unique_ptr<tracktion::graph::Node> createNodeForClips (EditItemID trackID, 
         if (params.includePlugins)
             for (auto clip : clips)
                 if (params.allowedClips == nullptr || params.allowedClips->contains (clip))
-                    if (auto pluginList = clip->getPluginList())
-                        for (auto p : *pluginList)
-                            if (p->getLatencySeconds() > 0.0)
-                                return true;
+                    if (! clip->compensatesOwnPluginLatency()) // Patch local Objekat @see Clip
+                        if (auto pluginList = clip->getPluginList())
+                            for (auto p : *pluginList)
+                                if (p->getLatencySeconds() > 0.0)
+                                    return true;
 
         return false;
     }();

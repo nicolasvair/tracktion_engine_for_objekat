@@ -204,6 +204,22 @@ public:
     /** Returns extra time after the clip end that needs processing (e.g., ARA tail time). */
     virtual TimeDuration getTail() const                  { return {}; }
 
+    /** Patch local Objekat — le clip compense lui-même la latence de sa propre PluginList.
+
+        Par défaut false : un plugin à latence sur une plugin-list de clip force toute la piste
+        à retomber du CombiningNode vers un SummingNode (cf. createNodeForClips), parce que le
+        CombiningNode ne processe pas en continu et que les FIFOs de latence ne seraient jamais
+        vidés. C'est la paresse qui saute, donc l'objectif même de cette branche.
+
+        Un clip qui renvoie true garantit deux choses :
+          - il aligne sa sortie tout seul (lecture anticipée du matériau de L samples), donc il
+            reporte une latence NULLE vers l'extérieur ;
+          - il étend sa fenêtre d'activation via getHead()/getTail() d'au moins L, pour que les
+            FIFOs se remplissent avant le clip et se vident après.
+        Le fallback SummingNode peut alors l'ignorer. @see ContainerClip.
+    */
+    virtual bool compensatesOwnPluginLatency() const      { return false; }
+
     /** Returns times for snapping to, relative to the Edit. Base class adds start and end time. */
     virtual juce::Array<TimePosition> getInterestingTimes();
 

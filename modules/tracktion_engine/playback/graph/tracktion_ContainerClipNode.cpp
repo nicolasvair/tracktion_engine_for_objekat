@@ -17,12 +17,14 @@ ContainerClipNode::ContainerClipNode (ProcessState& editProcessState,
                                       BeatRange position,
                                       BeatDuration offset,
                                       BeatRange clipLoopRange,
-                                      std::unique_ptr<Node> inputNode)
+                                      std::unique_ptr<Node> inputNode,
+                                      int latencyNumSamples)
     : TracktionEngineNode (editProcessState),
       containerClipID (clipID),
       clipPosition (position),
       loopRange (clipLoopRange),
       clipOffset (offset),
+      pluginLatencyNumSamples (std::max (0, latencyNumSamples)),
       input (std::move (inputNode))
 {
     if (auto parentTempoPosition = getProcessState().getTempoSequencePosition())
@@ -133,11 +135,26 @@ bool ContainerClipNode::isReadyToProcess()
 
 void ContainerClipNode::process (ProcessContext& pc)
 {
-    const auto sectionEditBeatRange = getEditBeatRange();
     const auto sectionEditSampleRange = getTimelineSampleRange();
+    const auto sampleRate = getSampleRate();
 
-    if (sectionEditBeatRange.getEnd() <= clipPosition.getStart()
-        || sectionEditBeatRange.getStart() >= clipPosition.getEnd())
+    // Bornes du clip en samples d'Edit, décalées de -L : à l'instant T on produit le matériau
+    // de T+L, pour que la chaîne de plugins — qui retarde de L — le remette en place.
+    const TimeRange clipTimeRange (tempoPosition->set (clipPosition.getStart()),
+                                   tempoPosition->set (clipPosition.getEnd()));
+    const auto clipSampleRangeUnshifted = toSamples (clipTimeRange, sampleRate);
+    const juce::Range<int64_t> clipSampleRange (clipSampleRangeUnshifted.getStart() - pluginLatencyNumSamples,
+                                                clipSampleRangeUnshifted.getEnd()   - pluginLatencyNumSamples);
+
+    // Fenêtre d'activation élargie : L avant (les FIFOs se remplissent), 2L après (elles se
+    // vident). Mêmes marges que ContainerClip::getHead()/getTail() donne au CombiningNode ;
+    // si elles ne concordaient pas, le garde ci-dessous annulerait le pré-roll qu'on vient
+    // de demander.
+    const auto activeSampleRange = clipSampleRange.withStart (clipSampleRange.getStart() - pluginLatencyNumSamples)
+                                                  .withEnd (clipSampleRange.getEnd() + 2 * pluginLatencyNumSamples);
+
+    if (sectionEditSampleRange.getEnd() <= activeSampleRange.getStart()
+        || sectionEditSampleRange.getStart() >= activeSampleRange.getEnd())
        return;
 
     // Set playHead loop range using loopRange
@@ -147,7 +164,6 @@ void ContainerClipNode::process (ProcessContext& pc)
     // Add an offset to ProcessState so the tempo positions can be synced up
 
     auto& player = playerContext->player;
-    const auto sampleRate = getSampleRate();
 
     auto& editPlayHead = getPlayHead();
     auto& editPlayHeadState = getPlayHeadState();
@@ -173,12 +189,25 @@ void ContainerClipNode::process (ProcessContext& pc)
     const auto playheadOffset = toSamples (editStartTimeOfLocalTimeline, sampleRate);
     playerContext->processState.setPlaybackSpeedRatio (getPlaybackSpeedRatio());
 
-    int64_t newPosition = editPlayHead.getPosition() - playheadOffset + loopRangeSamples.getStart();
+    // Lecture anticipée : +L AVANT le wrap de boucle, sinon l'avance sortirait de la plage
+    // bouclée au lieu de repasser au début.
+    int64_t newPosition = editPlayHead.getPosition() - playheadOffset + loopRangeSamples.getStart()
+                            + pluginLatencyNumSamples;
 
     if (localPlayHead.isLooping())
         newPosition = localPlayHead.linearPositionToLoopPosition (newPosition, localPlayHead.getLoopRange());
 
-    if (editPlayHeadState.isContiguousWithPreviousBlock())
+    // Réactivation après une période hors fenêtre : le CombiningNode ne nous a pas appelés
+    // pendant que le clip était hors du bloc, donc nos blocs à nous ne se suivent pas — même
+    // quand ceux de l'Edit se suivent. Sans ce test on prendrait overridePosition() et le
+    // graphe interne ne verrait aucun saut : notes MIDI suspendues, FIFOs de plugins pleines
+    // de matériau périmé. setPosition() marque l'interaction, PlayHeadState local propage le
+    // saut, et les nœuds internes se remettent d'aplomb (cf. PluginNode : all-notes-off sur
+    // didPlayheadJump).
+    const bool contiguousForUs = lastProcessedReferenceSampleEnd == pc.referenceSampleRange.getStart();
+    lastProcessedReferenceSampleEnd = pc.referenceSampleRange.getEnd();
+
+    if (contiguousForUs && editPlayHeadState.isContiguousWithPreviousBlock())
         localPlayHead.overridePosition (newPosition);
     else
         localPlayHead.setPosition (newPosition);
@@ -197,15 +226,14 @@ void ContainerClipNode::process (ProcessContext& pc)
                              { pc.buffers.audio, pc.buffers.midi } };
     player.process (localPC);
 
-    // Silence any samples before or after our edit time range
+    // Silence any samples before or after our edit time range.
+    // N.B. les bornes sont celles décalées de -L : c'est le CONTENU du container qu'on borne
+    // ici, pas la queue de sa chaîne de plugins — celle-ci vit en aval et doit continuer à
+    // sonner pendant le tail.
     {
-        const TimeRange clipTimeRange (tempoPosition->set (clipPosition.getStart()),
-                                       tempoPosition->set (clipPosition.getEnd()));
-        const auto editPositionInSamples = toSamples ({ clipTimeRange.getStart(), clipTimeRange.getEnd() }, sampleRate);
-
         const auto destBuffer = pc.buffers.audio;
-        auto numSamplesToClearAtStart = std::min (editPositionInSamples.getStart() - sectionEditSampleRange.getStart(), (SampleCount) destBuffer.getNumFrames());
-        auto numSamplesToClearAtEnd = std::min (sectionEditSampleRange.getEnd() - editPositionInSamples.getEnd(), (SampleCount) destBuffer.getNumFrames());
+        auto numSamplesToClearAtStart = std::min (clipSampleRange.getStart() - sectionEditSampleRange.getStart(), (SampleCount) destBuffer.getNumFrames());
+        auto numSamplesToClearAtEnd = std::min (sectionEditSampleRange.getEnd() - clipSampleRange.getEnd(), (SampleCount) destBuffer.getNumFrames());
 
         if (numSamplesToClearAtStart > 0)
             destBuffer.getStart ((choc::buffer::FrameCount) numSamplesToClearAtStart).clear();
