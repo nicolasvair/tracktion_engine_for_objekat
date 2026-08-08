@@ -40,17 +40,19 @@ struct CombiningNode::TimedNode
         // processé après tous ses inputs, et la déduplication qu'un nœud partagé entre deux
         // branches ne l'est qu'une fois.
         nodesToProcess = tracktion::graph::getNodes (*node, tracktion::graph::VertexOrdering::postordering);
+        inspectChain();
 
-        // Les feuilles sont les seules dont la disponibilité dépend de l'extérieur : tous les
-        // autres nœuds ont leurs inputs dans cette liste, processés avant eux.
-        for (auto n : nodesToProcess)
+        if (! isLinearChain)
         {
-            const auto numInputs = n->getDirectInputNodes().size();
-
-            if (numInputs == 0)
-                leafNodes.push_back (n);
-            else if (numInputs > 1)
-                isLinearChain = false;
+            // La chaîne d'un TimedNode n'est jamais transformée : le graphe englobant ne la voit
+            // pas (CombiningNode::getDirectInputNodes() renvoie {}). Sans transformation, un
+            // SummingNode ne poserait pas ses LatencyNode et les branches parallèles sortiraient
+            // désalignées. On la traite donc comme le petit graphe qu'elle est — mais seulement
+            // quand elle se ramifie : sur une chaîne série, transform() n'a rien à faire et on
+            // s'épargne un coût payé par clip, à chaque reconstruction.
+            nodesToProcess = tracktion::graph::transformNodes (*node, false);
+            leafNodes.clear();
+            inspectChain();
         }
     }
 
@@ -155,6 +157,25 @@ private:
     const std::unique_ptr<Node> node;
     std::vector<Node*> nodesToProcess, leafNodes;
     bool isLinearChain = true;
+
+    /** Relève les feuilles — les seules dont la disponibilité dépende de l'extérieur, tous les
+        autres nœuds ayant leurs inputs dans la liste et processés avant eux — et note si la
+        chaîne se ramifie.
+    */
+    void inspectChain()
+    {
+        isLinearChain = true;
+
+        for (auto n : nodesToProcess)
+        {
+            const auto numInputs = n->getDirectInputNodes().size();
+
+            if (numInputs == 0)
+                leafNodes.push_back (n);
+            else if (numInputs > 1)
+                isLinearChain = false;
+        }
+    }
    #if JUCE_DEBUG
     bool hasPrefetched = false;
    #endif

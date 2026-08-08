@@ -1440,6 +1440,53 @@ std::unique_ptr<tracktion::graph::Node> createNodeForRackInstance (RackInstance&
                                      [dryGain = rackInstance.dryGain] { return dryGain->getCurrentValue(); });
 }
 
+// Patch local Objekat — déplie un bloc de plugins parallèles en SummingNode { branche… }.
+// Chaque branche part de la MÊME entrée, partagée par un ConnectedNode : le nœud d'entrée est
+// donc détenu par des shared_ptr, pas par la chaîne unique_ptr. Le DFS dédupliqué de
+// CombiningNode::TimedNode ne le processe qu'une fois. @see ParallelPluginBlock
+std::unique_ptr<tracktion::graph::Node> createNodeForParallelBlock (ParallelPluginBlock& block, Plugin& plugin,
+                                                                    const TrackMuteState* trackMuteState,
+                                                                    std::unique_ptr<Node> input,
+                                                                    tracktion::graph::PlayHeadState& playHeadState,
+                                                                    const CreateNodeParams& params)
+{
+    auto branches = block.getParallelBranches();
+
+    branches.erase (std::remove (branches.begin(), branches.end(), nullptr), branches.end());
+
+    // Aucune branche : le bloc est transparent. Une seule : inutile de payer un ConnectedNode
+    // et un SummingNode pour ça, on la met en série.
+    if (branches.empty())
+        return input;
+
+    if (branches.size() == 1)
+        return createPluginNodeForList (*branches.front(), trackMuteState, std::move (input), playHeadState, params);
+
+    const auto inputProps = input->getNodeProperties();
+    std::shared_ptr<Node> sharedInput (std::move (input));
+    std::vector<std::unique_ptr<Node>> branchNodes;
+
+    for (size_t i = 0; i < branches.size(); ++i)
+    {
+        size_t nodeID = 0;
+        hash_combine (nodeID, plugin.itemID.getRawID());
+        hash_combine (nodeID, i);
+
+        auto connected = std::make_unique<tracktion::graph::ConnectedNode> (nodeID);
+
+        for (int c = 0; c < inputProps.numberOfChannels; ++c)
+            connected->addAudioConnection (sharedInput, { c, c });
+
+        if (inputProps.hasMidi)
+            connected->addMidiConnection (sharedInput);
+
+        branchNodes.push_back (createPluginNodeForList (*branches[i], trackMuteState,
+                                                        std::move (connected), playHeadState, params));
+    }
+
+    return makeNode<tracktion::graph::SummingNode> (std::move (branchNodes));
+}
+
 std::unique_ptr<tracktion::graph::Node> createPluginNodeForList (PluginList& list, const TrackMuteState* trackMuteState, std::unique_ptr<Node> node,
                                                                  tracktion::graph::PlayHeadState& playHeadState, const CreateNodeParams& params)
 {
@@ -1465,6 +1512,12 @@ std::unique_ptr<tracktion::graph::Node> createPluginNodeForList (PluginList& lis
         {
             if (returnPlugin->isEnabled())
                 node = makeNode<ReturnNode> (std::move (node), returnPlugin->busNumber);
+        }
+        else if (auto parallelBlock = dynamic_cast<ParallelPluginBlock*> (p))
+        {
+            if (p->isEnabled())
+                node = createNodeForParallelBlock (*parallelBlock, *p, trackMuteState,
+                                                   std::move (node), playHeadState, params);
         }
         else if (auto rackInstance = dynamic_cast<RackInstance*> (p))
         {

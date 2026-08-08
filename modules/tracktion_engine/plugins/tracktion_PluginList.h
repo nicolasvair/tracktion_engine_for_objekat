@@ -90,4 +90,57 @@ private:
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (PluginList)
 };
 
+
+//==============================================================================
+/** Patch local Objekat — interface d'un plugin qui, au lieu d'une chaîne, en contient N
+    en PARALLÈLE.
+
+    `createPluginNodeForList` reconnaît cette interface et déplie le plugin en
+    `SummingNode { branche… }`, chaque branche partant de la même entrée via un
+    `ConnectedNode`. `SummingNode::createLatencyNodes()` égalise ensuite les branches
+    entre elles.
+
+    Pourquoi pas un `RackInstance`, comme le suggérait la spec : `createNodeForRackInstance`
+    ne construit pas le rack sur place, il pose des `SendNode`/`ReturnNode` sur des bus et le
+    graphe du rack est bâti à la RACINE de l'Edit. `ReturnNode::findSendNodes` cherche alors
+    ses sends dans le graphe en cours de transformation — invisible depuis le graphe local
+    d'un container. C'est la règle du container : frontière de graphe, rien ne traverse.
+
+    Le plugin lui-même ne traite aucun audio, il est purement structurel : tout se joue à la
+    construction du nœud.
+*/
+struct ParallelPluginBlock
+{
+    virtual ~ParallelPluginBlock() = default;
+
+    /** Les branches, dans l'ordre. Une liste vide laisse simplement passer l'entrée. */
+    virtual std::vector<PluginList*> getParallelBranches() = 0;
+
+    /** Latence du bloc : la branche la plus longue, chaque branche étant la somme SÉRIE de
+        ses plugins. Récursif, un bloc pouvant en contenir un autre.
+
+        À renvoyer depuis `Plugin::getLatencySeconds()` de l'implémentation concrète : sans
+        ça la PDC du container sous-compenserait, silencieusement.
+    */
+    static double getMaxBranchLatencySeconds (ParallelPluginBlock& block)
+    {
+        double maxLatency = 0.0;
+
+        for (auto branch : block.getParallelBranches())
+        {
+            if (branch == nullptr)
+                continue;
+
+            double branchLatency = 0.0;
+
+            for (auto p : *branch)
+                branchLatency += std::max (0.0, p->getLatencySeconds());
+
+            maxLatency = std::max (maxLatency, branchLatency);
+        }
+
+        return maxLatency;
+    }
+};
+
 } // namespace tracktion::inline engine
