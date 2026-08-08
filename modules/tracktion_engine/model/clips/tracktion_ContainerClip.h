@@ -62,13 +62,9 @@ public:
     /** @internal */
     HashCode getHash() const override;
 
-    //==============================================================================
-    /** @internal Patch local Objekat — le container lit son contenu getPluginLatencySeconds()
-        en avance pour que la sortie, retardée d'autant par sa chaîne, retombe alignée sur la
-        timeline de l'Edit, et reporte donc une latence nulle vers l'extérieur.
-        getHead()/getTail() sont ceux de Clip. @see Clip::compensatesOwnPluginLatency
-    */
-    bool compensatesOwnPluginLatency() const override           { return true; }
+    // Patch local Objekat — le container ne surcharge PLUS compensatesOwnPluginLatency() : il
+    // déclare sa latence comme n'importe quel clip et la PDC globale l'aligne.
+    // @see Clip::compensatesOwnPluginLatency
 
     /** @internal */
     void setLoopDefaults() override;

@@ -921,12 +921,18 @@ std::unique_ptr<tracktion::graph::Node> createNodeForContainerClip (ContainerCli
     // Combiner clip and the contained clips need their own, local PlayHeadState.
     // This also needs to persist across graph rebuilds to maintain continuity.
     // Once the ContainerClipNode has been initialised it will update it's children with its own ProcessState
-    // Patch local Objekat — latence de la chaîne de plugins du container, compensée en
-    // interne par lecture anticipée pour que le CombiningNode de la piste n'ait rien à
-    // compenser et reste paresseux. @see Clip::compensatesOwnPluginLatency
-    const auto pluginLatencyNumSamples = params.includePlugins
-                                            ? juce::roundToInt (clip.getPluginLatencySeconds() * params.sampleRate)
-                                            : 0;
+    // Patch local Objekat — plus de lecture anticipée (elle valait 0007/0008).
+    //
+    // Elle n'existait que pour faire reporter au container une latence NULLE, seul moyen à
+    // l'époque de le soustraire au repli `clipsHaveLatency` qui condamnait toute la lane au
+    // traitement continu. Ce repli a disparu, donc la raison d'être aussi.
+    //
+    // Et elle a un défaut structurel : lire L en avance suppose d'avoir tourné L avant le
+    // groupe. Au retour d'une boucle dont le IN tombe sur le début du groupe, cet élan
+    // n'existe pas — les L premières millisecondes du groupe sortaient perdues à chaque tour.
+    // Un clip ordinaire n'a jamais eu ce problème : il déclare sa latence, la PDC globale
+    // retarde le reste, et rien n'a besoin d'élan. Le container fait pareil désormais.
+    const auto pluginLatencyNumSamples = 0;
 
     auto node = makeNode<ContainerClipNode> (params.processState,
                                              clip.itemID,
@@ -947,20 +953,6 @@ std::unique_ptr<tracktion::graph::Node> createNodeForContainerClip (ContainerCli
 
             node = createPluginNodeForList (*pluginList, nullptr, std::move (node), params.processState.playHeadState, params);
 
-           #if ! USE_DYNAMIC_OFFSET_CONTAINER_CLIP
-            // Patch local Objekat — le ContainerClipNode lit son contenu avec L d'avance, donc
-            // au bloc `t` toute cette chaîne traite du matériau appartenant à `t`, pas à `t - L`.
-            // On l'annonce à chaque PluginNode pour qu'il corrige son temps d'edit ; sans quoi la
-            // fenêtre de groupe, qui s'en sert comme d'une porte, coupe les L premiers samples.
-            // Le parcours s'arrête au ContainerClipNode, qui n'expose pas d'entrées directes.
-            if (pluginLatencyNumSamples > 0)
-                visitNodes (*node,
-                            [pluginLatencyNumSamples] (auto& n)
-                            {
-                                if (auto pn = dynamic_cast<PluginNode*> (&n))
-                                    pn->setReadAheadNumSamples (pluginLatencyNumSamples);
-                            }, true);
-           #endif
         }
     }
 
