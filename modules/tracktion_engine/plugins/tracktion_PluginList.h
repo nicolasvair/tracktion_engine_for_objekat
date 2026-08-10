@@ -113,6 +113,16 @@ struct ParallelPluginBlock
 {
     virtual ~ParallelPluginBlock() = default;
 
+    /** Type de l'arbre qui porte la chaîne d'une branche : un enfant `<BRANCH>` de l'état du
+        plugin. C'est un hôte légitime de `PluginList` — @see PluginList::initialise, qui
+        l'accepte au même titre qu'une piste ou un clip.
+
+        Déclaré ici pour que le tag soit un CONTRAT de l'interface : l'implémentation concrète
+        vit côté application, et la même chaîne de caractères écrite des deux côtés n'en serait
+        pas un.
+    */
+    static const juce::Identifier branchTreeType;
+
     /** Les branches, dans l'ordre. Une liste vide laisse simplement passer l'entrée. */
     virtual std::vector<PluginList*> getParallelBranches() = 0;
 
@@ -142,5 +152,7 @@ struct ParallelPluginBlock
         return maxLatency;
     }
 };
+
+inline const juce::Identifier ParallelPluginBlock::branchTreeType ("BRANCH");
 
 } // namespace tracktion::inline engine

@@ -89,7 +89,11 @@ void PluginList::initialise (const juce::ValueTree& v)
               || v.hasType (IDs::MIDICLIP)
               || v.hasType (IDs::STEPCLIP)
               || v.hasType (IDs::EDITCLIP)
-              || v.hasType (IDs::CONTAINERCLIP));
+              || v.hasType (IDs::CONTAINERCLIP)
+              // Patch local Objekat — une branche de bloc de plugins parallèles porte sa chaîne
+              // dans un enfant <BRANCH> de l'état du plugin. Ce n'est ni une piste ni un clip,
+              // et c'est pourtant un hôte de plugin-list légitime. @see ParallelPluginBlock
+              || v.hasType (ParallelPluginBlock::branchTreeType));
 
     state = v;
     list = std::make_unique<ObjectList> (*this, state);
