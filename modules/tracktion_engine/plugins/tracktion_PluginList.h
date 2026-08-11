@@ -155,4 +155,48 @@ struct ParallelPluginBlock
 
 inline const juce::Identifier ParallelPluginBlock::branchTreeType ("BRANCH");
 
+
+//==============================================================================
+/** Patch local Objekat — interface d'un plugin qui ENVOIE vers un bus d'aux interne au
+    ContainerClip englobant.
+
+    Le bus est strictement local : l'émetteur et l'aux visé doivent être enfants directs du
+    MÊME container. C'est la règle de frontière de graphe — le graphe local d'un container est
+    transformé séparément, donc un `SendNode`/`ReturnNode` posé dedans ne se verrait pas.
+
+    **Pourquoi un plugin plutôt qu'un nœud.** `CombiningNode::getInternalNodes()` renvoie tous
+    les nœuds de toutes ses chaînes `TimedNode` au graphe englobant. Comme la chaîne de chaque
+    objet vit sur la plugin-list de son CLIP, tout nœud inséré là est visible du transform
+    externe, qui le câblerait comme dépendance d'un return schedulé en continu — alors que le
+    `CombiningNode` ne traite ses `TimedNode` que dans leur fenêtre. C'est ce qui a tué
+    `LatencyMaskingNode`. Un plugin, lui, est enveloppé dans un `PluginNode` parfaitement
+    ordinaire : aucun transform ne s'y intéresse.
+
+    **Pourquoi un buffer PAR ENVOI et non un buffer par bus.** Un buffer partagé devrait être
+    alloué quelque part et sa durée de vie recouper celle de deux graphes pendant une
+    reconstruction. Ici chaque envoi possède le sien, dimensionné dans son propre
+    `Plugin::initialise` — au bon moment, sur le bon thread, avec la bonne taille de bloc — et
+    le nœud de retour se contente de sommer ceux qui ont écrit. Aucune propriété partagée,
+    aucun atomique, aucune énigme de durée de vie. Un envoi qui ne joue pas n'écrit rien : le
+    silence est gratuit.
+
+    @see ObjAuxReturnNode, createNodeForContainerClip
+*/
+struct ContainerAuxSend
+{
+    virtual ~ContainerAuxSend() = default;
+
+    /** Le clip aux visé. Doit être un enfant direct du même container, sinon l'envoi est
+        ignoré à la construction du graphe (et journalisé côté application).
+    */
+    virtual EditItemID getTargetAuxClipID() const = 0;
+
+    /** Rend le buffer écrit pendant CE bloc, ou nullptr si l'envoi n'a pas tourné (hors de la
+        fenêtre de son clip, bypassé, niveau à zéro). Consomme le drapeau : deux appels dans le
+        même bloc ne rendent la donnée qu'une fois. Appelé par le nœud de retour, donc après
+        toute la chaîne d'émetteurs — l'arête de dépendance vers le `CombiningNode` le garantit.
+    */
+    virtual const juce::AudioBuffer<float>* getAndClearAuxTap (int& numSamples) = 0;
+};
+
 } // namespace tracktion::inline engine

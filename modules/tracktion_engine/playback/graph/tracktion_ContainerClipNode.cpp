@@ -247,4 +247,105 @@ void ContainerClipNode::process (ProcessContext& pc)
     }
 }
 
+//==============================================================================
+//==============================================================================
+ObjAuxReturnNode::ObjAuxReturnNode (ProcessState& editProcessState,
+                                    std::shared_ptr<tracktion::graph::Node> dependencyToUse,
+                                    std::vector<Plugin::Ptr> sendersToUse,
+                                    TimeRange auxTimeRange,
+                                    int numChannelsToUse,
+                                    size_t nodeIDToUse)
+    : TracktionEngineNode (editProcessState),
+      dependency (std::move (dependencyToUse)),
+      senderPlugins (std::move (sendersToUse)),
+      auxRange (auxTimeRange),
+      numChannels (std::max (1, numChannelsToUse)),
+      auxNodeID (nodeIDToUse)
+{
+    assert (dependency);
+
+    for (auto& p : senderPlugins)
+        if (auto send = dynamic_cast<ContainerAuxSend*> (p.get()))
+            senders.push_back (send);
+
+    setOptimisations ({ tracktion::graph::ClearBuffers::no,
+                        tracktion::graph::AllocateAudioBuffer::yes });
+}
+
+tracktion::graph::NodeProperties ObjAuxReturnNode::getNodeProperties()
+{
+    tracktion::graph::NodeProperties props;
+    props.hasAudio = true;
+    props.hasMidi = false;
+    props.numberOfChannels = numChannels;
+    props.latencyNumSamples = 0;
+    props.nodeID = auxNodeID;
+
+    return props;
+}
+
+std::vector<tracktion::graph::Node*> ObjAuxReturnNode::getDirectInputNodes()
+{
+    // L'audio de cette entrée n'est PAS consommé — seule l'arête compte, pour l'ordre.
+    return { dependency.get() };
+}
+
+bool ObjAuxReturnNode::isReadyToProcess()
+{
+    return dependency->hasProcessed();
+}
+
+void ObjAuxReturnNode::process (ProcessContext& pc)
+{
+    auto destAudio = pc.buffers.audio;
+    destAudio.clear();
+
+    const auto numDestFrames = (choc::buffer::FrameCount) destAudio.getNumFrames();
+    const auto numDestChans  = (choc::buffer::ChannelCount) destAudio.getNumChannels();
+
+    if (numDestFrames == 0 || numDestChans == 0)
+        return;
+
+    // Les taps sont TOUJOURS consommés, y compris hors de la fenêtre de l'aux : un tap laissé
+    // en attente ressortirait tel quel à la réactivation suivante. C'est exactement le piège
+    // du pré-roll (patch 0014) — ce qu'on croit jeter, on le rend audible plus tard.
+    for (auto send : senders)
+    {
+        int numSamples = 0;
+        auto tap = send->getAndClearAuxTap (numSamples);
+
+        // nullptr : l'envoi n'a pas tourné ce bloc — son émetteur est hors de sa fenêtre, ou
+        // bypassé. C'est le cas nominal et il ne coûte rien.
+        if (tap == nullptr || numSamples <= 0)
+            continue;
+
+        auto srcView = tracktion::graph::toBufferView (*const_cast<juce::AudioBuffer<float>*> (tap));
+
+        const auto frames = std::min (numDestFrames, (choc::buffer::FrameCount) numSamples);
+        const auto chans  = std::min (numDestChans, srcView.getNumChannels());
+
+        choc::buffer::add (destAudio.getChannelRange ({ 0, chans }).getStart (frames),
+                           srcView.getChannelRange ({ 0, chans }).getStart (frames));
+    }
+
+    // Bornes de l'aux. Sans ça il sonnerait hors de sa propre fenêtre dès qu'un émetteur joue :
+    // le nœud n'a pas de CombiningNode au-dessus de lui pour l'activer par tranches — c'est le
+    // prix de l'arête de dépendance. Même geste que ContainerClipNode::process pour son contenu.
+    {
+        const auto sectionRange = getTimelineSampleRange();
+        const auto clipRange = toSamples (auxRange, getSampleRate());
+
+        auto numToClearAtStart = std::min (clipRange.getStart() - sectionRange.getStart(),
+                                           (SampleCount) numDestFrames);
+        auto numToClearAtEnd   = std::min (sectionRange.getEnd() - clipRange.getEnd(),
+                                           (SampleCount) numDestFrames);
+
+        if (numToClearAtStart > 0)
+            destAudio.getStart ((choc::buffer::FrameCount) numToClearAtStart).clear();
+
+        if (numToClearAtEnd > 0)
+            destAudio.getEnd ((choc::buffer::FrameCount) numToClearAtEnd).clear();
+    }
+}
+
 } // namespace tracktion::inline engine

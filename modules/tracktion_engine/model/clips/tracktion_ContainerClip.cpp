@@ -13,6 +13,8 @@ namespace tracktion::inline engine {
 ContainerClip::ContainerClip (const juce::ValueTree& v, EditItemID clipID, ClipOwner& targetParent)
     : AudioClipBase (v, clipID, Type::container, targetParent)
 {
+    // Patch local Objekat — @see isObjAuxBus
+    objAuxBus.referTo (state, juce::Identifier ("objAuxBus"), getUndoManager(), false);
 }
 
 ContainerClip::~ContainerClip()

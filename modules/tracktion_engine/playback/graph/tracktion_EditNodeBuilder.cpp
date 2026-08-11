@@ -877,12 +877,122 @@ std::unique_ptr<tracktion::graph::Node> createNodeForStepClip (StepClip& clip, c
     return node;
 }
 
+// Patch local Objekat — greffe les retours d'aux INTERNES sur le graphe local d'un container.
+//
+//     contenu   = CombiningNode { enfants non-aux }        ← les envois y écrivent
+//     partagé   = shared_ptr (contenu)
+//     sec       = ConnectedNode (partagé)                   ← branche sèche
+//     retour_i  = ObjAuxReturnNode (dépend de partagé) → FX de l'aux i → fades de l'aux i
+//     résultat  = SummingNode { sec, retour_1…retour_n }
+//
+// L'arête `retour_i → partagé` n'est pas décorative : elle seule ordonne les envois avant leur
+// lecture. Deux frères d'un SummingNode n'ont aucun ordre garanti entre eux.
+//
+// Les envois sont cherchés au niveau supérieur de la chaîne de chaque enfant DIRECT. Pas dans
+// les branches d'un bloc parallèle : une branche n'est pas un objet, et l'application pose
+// l'envoi post-fader. Pas non plus dans la chaîne du container lui-même : elle vit en AVAL du
+// ContainerClipNode, donc hors de ce graphe — et viser son propre aux serait un bouclage.
+static std::unique_ptr<Node> createAuxReturnsForContainer (const juce::Array<Clip*>& contentClips,
+                                                           const juce::Array<ContainerClip*>& auxClips,
+                                                           std::unique_ptr<Node> contentNode,
+                                                           const CreateNodeParams& params)
+{
+    if (auxClips.isEmpty() || contentNode == nullptr)
+        return contentNode;
+
+    auto sendersFor = [&contentClips] (EditItemID auxID)
+    {
+        std::vector<Plugin::Ptr> result;
+
+        for (auto c : contentClips)
+            if (auto pl = c->getPluginList())
+                for (auto p : *pl)
+                    if (auto send = dynamic_cast<ContainerAuxSend*> (p))
+                        if (send->getTargetAuxClipID() == auxID)
+                            result.push_back (p);
+
+        return result;
+    };
+
+    const auto contentProps = contentNode->getNodeProperties();
+    const int numChannels = std::max (2, contentProps.numberOfChannels);
+
+    std::shared_ptr<Node> sharedContent (std::move (contentNode));
+    std::vector<std::unique_ptr<Node>> summedNodes;
+
+    // Branche sèche : un ConnectedNode, comme le dépliage d'un bloc parallèle — le contenu est
+    // désormais détenu par des shared_ptr et lu par plusieurs nœuds.
+    {
+        size_t nodeID = 0;
+        hash_combine (nodeID, (size_t) 0x0B7A0DE7);
+        hash_combine (nodeID, contentProps.nodeID);
+
+        auto connected = std::make_unique<tracktion::graph::ConnectedNode> (nodeID);
+
+        for (int c = 0; c < contentProps.numberOfChannels; ++c)
+            connected->addAudioConnection (sharedContent, { c, c });
+
+        if (contentProps.hasMidi)
+            connected->addMidiConnection (sharedContent);
+
+        summedNodes.push_back (std::move (connected));
+    }
+
+    for (auto auxClip : auxClips)
+    {
+        size_t nodeID = 0;
+        hash_combine (nodeID, (size_t) 0x0B7A0E37);
+        hash_combine (nodeID, auxClip->itemID.getRawID());
+
+        std::unique_ptr<Node> returnNode = makeNode<ObjAuxReturnNode> (params.processState,
+                                                                       sharedContent,
+                                                                       sendersFor (auxClip->itemID),
+                                                                       auxClip->getEditTimeRange(),
+                                                                       numChannels,
+                                                                       nodeID);
+
+        if (params.includePlugins)
+        {
+            if (auto pluginList = auxClip->getPluginList())
+            {
+                // Comme pour un groupe : ces plugins ne sont dans aucune liste hôte déjà
+                // initialisée, et leur latence lirait 0 au premier build.
+                for (auto p : *pluginList)
+                    p->initialiseFully();
+
+                returnNode = createPluginNodeForList (*pluginList, nullptr, std::move (returnNode),
+                                                      params.processState.playHeadState, params);
+            }
+        }
+
+        summedNodes.push_back (createFadeNodeForClip (*auxClip, auxClip->getEditTimeRange(),
+                                                      std::move (returnNode), params));
+    }
+
+    return makeNode<tracktion::graph::SummingNode> (std::move (summedNodes));
+}
+
 std::unique_ptr<tracktion::graph::Node> createNodeForContainerClip (ContainerClip& clip, [[ maybe_unused ]] const TrackMuteState& trackMuteState,
                                                                     const CreateNodeParams& params, ClipRole role)
 {
     CRASH_TRACER
-    const auto& clips = clip.getClips();
+    const auto& allChildClips = clip.getClips();
 
+    // Patch local Objekat — un enfant marqué « bus d'aux » n'est pas une source : il REÇOIT.
+    // On l'écarte du CombiningNode et il devient une branche de retour. @see ContainerClip::isObjAuxBus
+    juce::Array<Clip*> clips;
+    juce::Array<ContainerClip*> auxClips;
+
+    for (auto c : allChildClips)
+    {
+        if (auto cc = dynamic_cast<ContainerClip*> (c); cc != nullptr && cc->isObjAuxBus())
+            auxClips.add (cc);
+        else
+            clips.add (c);
+    }
+
+    // Un container sans contenu ne produit rien — même s'il porte des aux, personne ne leur
+    // enverrait quoi que ce soit.
     if (clips.isEmpty())
         return {};
 
@@ -939,7 +1049,9 @@ std::unique_ptr<tracktion::graph::Node> createNodeForContainerClip (ContainerCli
                                              BeatRange (clip.getStartBeat(), clip.getEndBeat()),
                                              clip.getOffsetInBeats(),
                                              clip.getLoopRangeBeats(),
-                                             createNodeForClips (clip.itemID, clips, trackMuteState, params),
+                                             createAuxReturnsForContainer (clips, auxClips,
+                                                                           createNodeForClips (clip.itemID, clips, trackMuteState, params),
+                                                                           params),
                                              pluginLatencyNumSamples);
    #endif
 
