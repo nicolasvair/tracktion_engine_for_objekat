@@ -813,6 +813,14 @@ bool isArrangerTrack (const ClipOwner& t)                       { return dynamic
 //==============================================================================
 bool canContainMIDI (const ClipOwner& co)
 {
+    // Patch local Objekat — un ContainerClip accepte le MIDI, comme il accepte déjà l'audio
+    // juste en dessous. Rien d'autre ne manquait : createNodeForClip dispatche déjà MidiClip
+    // depuis le CombiningNode INTERNE du container, et ContainerClipNode::process passe
+    // `pc.buffers.midi` à son player local — le MIDI ressort donc du container et traverse sa
+    // plugin-list, où l'instrument virtuel est posé en index 0.
+    if (dynamic_cast<const ContainerClip*> (&co) != nullptr)
+        return true;
+
     if (auto track = dynamic_cast<const Track*> (&co))
         return isAudioTrack (*track);
 

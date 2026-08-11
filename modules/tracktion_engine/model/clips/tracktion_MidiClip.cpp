@@ -442,8 +442,13 @@ void MidiClip::scaleVerticallyToFit()
     {
         const double newVisProp = (maxNote - minNote) / 128.0;
 
-        if (newVisProp < getAudioTrack()->getMidiVisibleProportion())
-            getAudioTrack()->setMidiVerticalPos (newVisProp, 1.0 - (maxNote / 128.0));
+        // Patch local Objekat — un clip MIDI peut désormais vivre dans un ContainerClip, où il
+        // n'a PAS de piste porteuse directe : getAudioTrack() y est nul. L'échelle verticale
+        // étant une donnée de la piste, il n'y a simplement rien à régler dans ce cas.
+        // @see canContainMIDI
+        if (auto* at = getAudioTrack())
+            if (newVisProp < at->getMidiVisibleProportion())
+                at->setMidiVerticalPos (newVisProp, 1.0 - (maxNote / 128.0));
     }
 }
 

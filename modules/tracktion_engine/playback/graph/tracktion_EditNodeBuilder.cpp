@@ -2344,9 +2344,9 @@ static std::unique_ptr<Node> createTopLevelAuxReturns (Edit& edit,
                 senderClips.add (c);
         }
 
-        // La chaîne de la PISTE compte aussi : un clip MIDI garde une piste dédiée, et c'est
-        // là que vit sa chaîne — donc son envoi. Une piste de lane ordinaire, elle, ne porte
-        // jamais de plugin dans ce modèle, la boucle n'y trouvera rien.
+        // La chaîne de la PISTE compte aussi, au cas où l'hôte en pose une : dans le modèle
+        // d'Objekat les pistes du pool ne portent aucun plugin (toute chaîne d'objet vit sur
+        // son clip), donc la boucle n'y trouve rien — mais rien n'oblige un hôte à faire ça.
         senderLists.push_back (&ct->pluginList);
     }
 
