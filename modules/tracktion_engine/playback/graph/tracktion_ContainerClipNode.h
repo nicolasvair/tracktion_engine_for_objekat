@@ -86,6 +86,25 @@ private:
     N.B. `ClearBuffers::no` : le nœud vide lui-même son buffer avant de sommer. Ne pas s'en
     remettre au framework ici — @see le patch `0012`, où ~15 types comptaient sur le
     `CombiningNode` pour vider et où plus personne ne le faisait.
+
+    **Alignement (PDC).** Un tap est prélevé au MILIEU du graphe — à la fin de la chaîne de son
+    émetteur — alors que toute l'égalisation de latence se fait en aval : le rembourrage qui met
+    les clips d'une lane d'accord entre eux, puis les `LatencyNode` que le `SummingNode` pose
+    entre ses branches. La copie humide manque donc de tout ce retard-là, et d'un montant qui
+    diffère d'un émetteur à l'autre.
+
+    Ce nœud le rattrape avec une règle en une ligne : **retarder le tap i de
+    `référence − tapLatence_i`, et DÉCLARER `référence`**. La référence est la latence du nœud
+    de contenu — celui-là même auquel le retour sera sommé. Il suffit alors que
+    `tapLatence_i + retard_i` soit égal à la latence déclarée pour que l'égalisation d'aval
+    retombe exactement juste, quelle que soit la précision par ailleurs de la PDC amont : c'est
+    la définition même de ce que « déclarer une latence » veut dire dans ce graphe. La référence
+    majore toujours les taps (elle est un max sur des chemins qui les contiennent), donc les
+    retards sont positifs.
+
+    Corollaire : les bornes de la fenêtre de l'aux se lisent sur le temps du MATÉRIAU, décalé de
+    la latence déclarée — même convention que `PluginNode`, qui recule le temps d'edit qu'il
+    donne à ses plugins.
 */
 class ObjAuxReturnNode final : public tracktion::graph::Node,
                                public TracktionEngineNode
@@ -96,21 +115,41 @@ public:
                       std::vector<Plugin::Ptr> senders,
                       TimeRange auxTimeRange,
                       int numChannels,
-                      size_t nodeID);
+                      size_t nodeID,
+                      int referenceLatencyNumSamples);
 
     //==============================================================================
     tracktion::graph::NodeProperties getNodeProperties() override;
     std::vector<tracktion::graph::Node*> getDirectInputNodes() override;
+    void prepareToPlay (const tracktion::graph::PlaybackInitialisationInfo&) override;
     bool isReadyToProcess() override;
     void process (ProcessContext&) override;
 
 private:
+    //==============================================================================
+    /** Ligne à retard d'UN tap. Circulaire, allouée dans prepareToPlay, et seulement pour les
+        envois dont le retard est non nul — le cas courant (aucune latence nulle part) ne coûte
+        donc rien. Elle avance à chaque bloc même quand l'envoi n'a rien écrit : une ligne à
+        retard qui saute des blocs ne retarde plus de ce qu'elle annonce.
+    */
+    struct TapDelay
+    {
+        juce::AudioBuffer<float> buffer;
+        int numSamples = 0;
+        int writePos = 0;
+    };
+
+    void addTap (const juce::AudioBuffer<float>* tap, int tapNumSamples,
+                 TapDelay*, choc::buffer::ChannelArrayView<float> dest);
+
     //==============================================================================
     std::shared_ptr<tracktion::graph::Node> dependency;
 
     // Les Ptr tiennent les plugins en vie ; le vecteur parallèle évite un dynamic_cast par bloc.
     std::vector<Plugin::Ptr> senderPlugins;
     std::vector<ContainerAuxSend*> senders;
+    // Parallèle à `senders` : la ligne à retard de chacun (vide si son retard est nul).
+    std::vector<TapDelay> tapDelays;
 
     // Bornes de l'aux, en temps d'EDIT. Comparables telles quelles au temps local du container :
     // son offset vaut le début de son étendue, donc temps local == temps edit (invariant posé
@@ -119,6 +158,8 @@ private:
 
     const int numChannels;
     const size_t auxNodeID;
+    // Latence déclarée = celle du nœud de contenu auquel ce retour sera sommé. @see la doc.
+    const int referenceLatency;
 };
 
 

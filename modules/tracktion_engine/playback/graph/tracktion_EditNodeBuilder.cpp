@@ -957,12 +957,15 @@ static std::unique_ptr<Node> createAuxReturns (const std::vector<PluginList*>& s
         hash_combine (nodeID, (size_t) 0x0B7A0E37);
         hash_combine (nodeID, auxClip->itemID.getRawID());
 
+        // La latence du nœud de CONTENU est la référence d'alignement des taps : c'est à cette
+        // somme-là que le retour ira s'ajouter. @see ObjAuxReturnNode.
         std::unique_ptr<Node> returnNode = makeNode<ObjAuxReturnNode> (params.processState,
                                                                        sharedContent,
                                                                        sendersFor (auxClip->itemID),
                                                                        auxClip->getEditTimeRange(),
                                                                        numChannels,
-                                                                       nodeID);
+                                                                       nodeID,
+                                                                       contentProps.latencyNumSamples);
 
         if (params.includePlugins)
         {
@@ -1719,6 +1722,14 @@ std::unique_ptr<tracktion::graph::Node> createPluginNodeForList (PluginList& lis
     {
         if (! params.forRendering && p->isFrozen())
             continue;
+
+        // Patch local Objekat — un envoi d'aux relève ici la latence accumulée à son point de
+        // prélèvement : c'est le seul endroit où on la connaisse, et c'est le nombre exact du
+        // graphe, pas une reconstitution côté modèle (le contenu d'un container, les FIFOs
+        // d'un bloc parallèle et les plugins précédents y sont déjà tous comptés).
+        // @see ContainerAuxSend::setTapLatencyNumSamples
+        if (auto auxSend = dynamic_cast<ContainerAuxSend*> (p))
+            auxSend->setTapLatencyNumSamples (node != nullptr ? node->getNodeProperties().latencyNumSamples : 0);
 
         if (auto meterPlugin = dynamic_cast<LevelMeterPlugin*> (p))
         {

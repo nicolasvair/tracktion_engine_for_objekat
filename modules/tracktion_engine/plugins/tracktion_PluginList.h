@@ -197,6 +197,34 @@ struct ContainerAuxSend
         toute la chaîne d'émetteurs — l'arête de dépendance vers le `CombiningNode` le garantit.
     */
     virtual const juce::AudioBuffer<float>* getAndClearAuxTap (int& numSamples) = 0;
+
+    //==============================================================================
+    /** Latence ACCUMULÉE en amont du point de prélèvement, en échantillons — relevée à la
+        construction du graphe par `createPluginNodeForList`, qui la lit sur le nœud d'entrée
+        de cet envoi.
+
+        Pourquoi le nœud de retour en a besoin : le tap est prélevé au milieu du graphe, à la
+        fin de la chaîne de son émetteur, alors que la PDC — celle qui égalise les clips d'une
+        même lane entre eux, puis les branches d'un `SummingNode` — n'opère qu'en AVAL de ce
+        point. Le signal sec de l'émetteur y gagne encore du retard que sa copie humide n'a
+        pas. Sans correctif, le retour sonne en avance de la latence propre de l'émetteur, et
+        d'un montant DIFFÉRENT par émetteur.
+
+        La correction est exacte pour un retard `d_i` tel que `d_i + tapLatence_i` soit égal
+        pour tous les envois d'un même retour, ET égal à la latence que ce retour DÉCLARE :
+        c'est la seule condition pour que l'égalisation en aval retombe juste. @see
+        ObjAuxReturnNode.
+
+        Inaudible sur une réverbe, mais rédhibitoire dès qu'on veut « Σ stems = mix, à
+        l'échantillon près ».
+    */
+    void setTapLatencyNumSamples (int n) noexcept           { tapLatencyNumSamples = std::max (0, n); }
+
+    /** @see setTapLatencyNumSamples */
+    int getTapLatencyNumSamples() const noexcept            { return tapLatencyNumSamples; }
+
+private:
+    int tapLatencyNumSamples = 0;
 };
 
 } // namespace tracktion::inline engine
