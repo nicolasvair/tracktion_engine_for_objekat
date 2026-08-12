@@ -1152,36 +1152,60 @@ std::unique_ptr<tracktion::graph::Node> createNodeForClips (EditItemID trackID, 
     //      aligne la piste comme n'importe quelle autre ;
     //   3. `laneLatency` ci-dessous égalise les entrées entre elles — sans quoi, la piste étant
     //      décalée de L en aval, un clip SANS plugin à latence sortirait L trop tôt.
-    // Un ContainerClip s'exclut des trois : il lit son matériau en avance et reporte 0.
     // @see Clip::getHead, Clip::compensatesOwnPluginLatency
-    const auto laneLatencySeconds = [&]
+    //
+    // Patch local Objekat — l'égalisation se calcule sur les latences de NŒUD, plus sur
+    // `Clip::getPluginLatencySeconds()`.
+    //
+    // Ce dernier ne compte que la plugin-list DU CLIP. C'était exact tant qu'un clip n'était
+    // qu'une source et sa chaîne ; ça ne l'est plus depuis qu'un `ContainerClip` déclare aussi
+    // la latence de son CONTENU (`ContainerClipNode::nodeProperties = input->getNodeProperties()`).
+    // Un groupe qui contenait un plugin à latence n'était donc pas égalisé avec ses frères de
+    // piste : le `CombiningNode` remontait bien le max RÉEL, si bien que le frère sans latence
+    // sortait en avance de cette latence-là (1000 samples ≈ 21 ms à 48 kHz, audible sur un
+    // transitoire). Le nœud est la seule source de vérité — c'est lui qui retarde.
+    struct ClipNodeEntry
     {
-        double l = 0.0;
+        Clip* clip = nullptr;
+        std::unique_ptr<Node> node;
+        int latencyNumSamples = 0;
+        TimeRange timeRange;
+        bool ignoreLatency = false;
+    };
 
-        if (params.includePlugins)
-            for (auto clip : clips)
-                if (params.allowedClips == nullptr || params.allowedClips->contains (clip))
-                    if (! clip->compensatesOwnPluginLatency())
-                        l = std::max (l, clip->getPluginLatencySeconds());
+    // Les nœuds d'abord : leur latence ne se connaît qu'une fois bâtis.
+    std::vector<ClipNodeEntry> clipEntries;
 
-        return l;
-    }();
+    for (auto clip : clips)
+        if (params.allowedClips == nullptr || params.allowedClips->contains (clip))
+            if (auto clipNode = createNodeForClip (*clip, trackMuteState, params, ClipRole::arranger))
+            {
+                const auto latency = clipNode->getNodeProperties().latencyNumSamples;
+                clipEntries.push_back ({ clip, std::move (clipNode), latency, {}, clip->compensatesOwnPluginLatency() });
+            }
+
+    int laneLatencyNumSamples = 0;
+
+    for (auto& e : clipEntries)
+        if (! e.ignoreLatency)
+            laneLatencyNumSamples = std::max (laneLatencyNumSamples, e.latencyNumSamples);
+
+    const auto laneLatencySeconds = laneLatencyNumSamples / params.sampleRate;
 
     // Complète la chaîne d'un clip pour qu'elle retarde d'autant que la plus lente de la lane,
     // et élargit sa fenêtre d'activation de ce même montant : le rembourrage a lui aussi une
     // FIFO à remplir avant le clip et à vider après.
-    auto equaliseLatency = [&] (Clip& clip, std::unique_ptr<Node> clipNode) -> std::pair<std::unique_ptr<Node>, TimeRange>
+    for (auto& e : clipEntries)
     {
+        auto& clip = *e.clip;
         auto timeRange = clip.getPosition().time;
         auto head = clip.getHead();
         auto tail = clip.getTail();
 
-        if (laneLatencySeconds > 0.0 && ! clip.compensatesOwnPluginLatency())
+        if (laneLatencyNumSamples > 0 && ! e.ignoreLatency)
         {
-            const auto padSeconds = laneLatencySeconds - clip.getPluginLatencySeconds();
-
-            if (const auto padSamples = juce::roundToInt (padSeconds * params.sampleRate); padSamples > 0)
-                clipNode = makeNode<tracktion::graph::LatencyNode> (std::move (clipNode), padSamples);
+            if (const auto padSamples = laneLatencyNumSamples - e.latencyNumSamples; padSamples > 0)
+                e.node = makeNode<tracktion::graph::LatencyNode> (std::move (e.node), padSamples);
 
             head = std::max (head, TimeDuration::fromSeconds (laneLatencySeconds));
             tail = std::max (tail, TimeDuration::fromSeconds (laneLatencySeconds * 2.0));
@@ -1191,55 +1215,19 @@ std::unique_ptr<tracktion::graph::Node> createNodeForClips (EditItemID trackID, 
         // traitement contigu que sa latence. Avant ça, c'est la queue de l'activation
         // précédente qui sort. @see LatencyPrimingNode
         //
-        // Ce qu'il faut amorcer, c'est ce que le clip retarde en propre — pour un ContainerClip
-        // sa chaîne interne, qu'il compense par lecture anticipée mais dont les FIFOs sont bien
-        // là ; pour un clip ordinaire sa chaîne plus le rembourrage d'égalisation, c'est-à-dire
-        // la latence de la lane.
-        const auto primeSeconds = clip.compensatesOwnPluginLatency() ? clip.getPluginLatencySeconds()
-                                                                     : std::max (laneLatencySeconds, clip.getPluginLatencySeconds());
+        // Après rembourrage, toute branche non auto-compensée retarde exactement de la latence
+        // de la lane : c'est ça qu'il faut amorcer. Une branche auto-compensée, elle, ne déclare
+        // rien — on ne peut lire ce qu'elle retarde que sur le modèle.
+        const auto primeSamples = e.ignoreLatency
+                                    ? juce::roundToInt (clip.getPluginLatencySeconds() * params.sampleRate)
+                                    : std::max (laneLatencyNumSamples, e.latencyNumSamples);
 
-        if (const auto primeSamples = juce::roundToInt (primeSeconds * params.sampleRate); primeSamples > 0)
-            clipNode = makeNode<LatencyPrimingNode> (std::move (clipNode), params.processState, primeSamples);
+        if (primeSamples > 0)
+            e.node = makeNode<LatencyPrimingNode> (std::move (e.node), params.processState, primeSamples);
 
-        return { std::move (clipNode),
-                 timeRange.withStart (timeRange.getStart() - head)
-                          .withEnd (timeRange.getEnd() + tail) };
-    };
-
-    if (clips.size() == 1)
-    {
-        auto clip = clips.getFirst();
-
-        if (params.allowedClips == nullptr || params.allowedClips->contains (clip))
-        {
-            auto combiner = std::make_unique<CombiningNode> (trackID, params.processState);
-
-            if (auto clipNode = createNodeForClip (*clip, trackMuteState, params, ClipRole::arranger))
-            {
-                auto [node, timeRange] = equaliseLatency (*clip, std::move (clipNode));
-                combiner->addInput (std::move (node), timeRange, clip->compensatesOwnPluginLatency());
-            }
-
-            return combiner;
-        }
+        e.timeRange = timeRange.withStart (timeRange.getStart() - head)
+                               .withEnd (timeRange.getEnd() + tail);
     }
-
-    struct ClipNodeEntry
-    {
-        std::unique_ptr<Node> node;
-        TimeRange timeRange;
-        bool ignoreLatency = false;
-    };
-
-    std::vector<ClipNodeEntry> clipEntries;
-
-    for (auto clip : clips)
-        if (params.allowedClips == nullptr || params.allowedClips->contains (clip))
-            if (auto clipNode = createNodeForClip (*clip, trackMuteState, params, ClipRole::arranger))
-            {
-                auto [node, timeRange] = equaliseLatency (*clip, std::move (clipNode));
-                clipEntries.push_back ({ std::move (node), timeRange, clip->compensatesOwnPluginLatency() });
-            }
 
     // Extract nodes, match channels, then put back
     std::vector<std::unique_ptr<Node>> nodeVec;
