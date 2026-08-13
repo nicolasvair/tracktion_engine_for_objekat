@@ -734,6 +734,29 @@ int findClipSlotIndex (ClipSlot& slot)
 
 
 //==============================================================================
+/** Searches a ClipOwner and every ContainerClip nested inside it, at any depth.
+
+    The flat findClipForID (ClipOwner&, EditItemID) is deliberately shallow — it answers
+    "does this owner contain it", which is what its callers ask. The Edit-level lookup below
+    promises something else ("if contained in the Edit"), so it has to descend all the way.
+*/
+static Clip* findClipForIDRecursive (ClipOwner& owner, EditItemID clipID)
+{
+    for (auto c : owner.getClips())
+    {
+        if (c->itemID == clipID)
+            return c;
+
+        // Any clip that owns clips, matching getClipsOfTypeRecursive's idiom rather than
+        // naming ContainerClip — today's only such type, but not necessarily tomorrow's.
+        if (auto nested = dynamic_cast<ClipOwner*> (c))
+            if (auto found = findClipForIDRecursive (*nested, clipID))
+                return found;
+    }
+
+    return {};
+}
+
 Clip* findClipForID (const Edit& edit, EditItemID clipID)
 {
     Clip* result = nullptr;
@@ -746,9 +769,15 @@ Clip* findClipForID (const Edit& edit, EditItemID clipID)
                                           return false;
                                       }
 
+                                      // Descend through NESTED containers, not just the ones sitting
+                                      // directly on the track. Stopping at the first level made this
+                                      // return nullptr for any clip two groups deep — a group inside a
+                                      // group — and every caller then silently lost the clip's
+                                      // properties: Plugin::getOwnerClip() is the one that hurt, a mono
+                                      // source no longer reporting itself as mono.
                                       for (auto cc : getTrackItemsOfType<ContainerClip> (t))
                                       {
-                                          if (auto c = findClipForID (*cc, clipID))
+                                          if (auto c = findClipForIDRecursive (*cc, clipID))
                                           {
                                               result = c;
                                               return false;
