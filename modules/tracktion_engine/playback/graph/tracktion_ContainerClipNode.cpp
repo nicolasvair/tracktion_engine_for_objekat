@@ -135,6 +135,24 @@ bool ContainerClipNode::isReadyToProcess()
 
 void ContainerClipNode::process (ProcessContext& pc)
 {
+    // Patch local Objekat — vide notre buffer MIDI de sortie : personne d'autre ne le fait.
+    //
+    // setOptimisations ({ ClearBuffers::no, … }) dispense Node::process de vider les DEUX
+    // buffers du nœud, audio et midi. Pour l'audio le contrat est repris par le CombiningNode
+    // (tempAudioBuffer.clear()) ou par le TimedNode (@see 0012) ; ni l'un ni l'autre ne touche
+    // au MIDI, et midiBuffer est un MEMBRE du nœud, persistant d'un bloc à l'autre. Or notre
+    // player local ne fait qu'AJOUTER dedans (NodePlayer : pc.buffers.midi.mergeFrom).
+    //
+    // Sans ce vidage les messages du bloc précédent restent — avec leur timestamp, situé dans
+    // [0, taille de bloc) — et repartent au bloc suivant : l'instrument posé en tête de la
+    // plugin-list du container reçoit le même note-on à CHAQUE bloc, et la liste grossit sans
+    // borne. C'est le larsen du 0012, côté MIDI ; il ne s'entend que depuis 0021, seul un
+    // container qui héberge un MidiClip produisant du MIDI.
+    //
+    // Vidé AVANT le garde de fenêtre : un bloc hors fenêtre sort sans rien écrire et
+    // ré-émettrait sinon le dernier bloc joué (le piège du tap en attente, @see 0014).
+    pc.buffers.midi.clear();
+
     const auto sectionEditSampleRange = getTimelineSampleRange();
     const auto sampleRate = getSampleRate();
 
