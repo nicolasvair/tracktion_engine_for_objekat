@@ -712,21 +712,28 @@ void EditTimecodeRemapperSnapshot::savePreChangeState (Edit& ed)
         clips.add (cp);
     };
 
+    // Un clip conteneur peut en contenir un autre (groupe dans un groupe), sans limite de
+    // profondeur : la descente doit être RÉCURSIVE. Avec une descente d'un seul niveau, les
+    // clips d'un sous-groupe n'entraient pas dans l'instantané et gardaient donc leurs anciennes
+    // secondes après le changement de tempo, pendant que tout le reste était remappé.
+    auto addClipTree = [&addClip] (auto&& self, auto clip) -> void
+    {
+        addClip (clip);
+
+        if (auto cc = dynamic_cast<ClipOwner*> (clip))
+            for (auto childClip : cc->getClips())
+                self (self, childClip);
+    };
+
     for (auto t : getClipTracks (ed))
     {
         for (auto& c : t->getClips())
-        {
-            addClip (c);
+            addClipTree (addClipTree, c);
 
-            if (auto cc = dynamic_cast<ClipOwner*> (c))
-                for (auto childClip : cc->getClips())
-                    addClip (childClip);
-        }
-        
         if (auto at = dynamic_cast<AudioTrack*> (t))
             for (auto slot : at->getClipSlotList().getClipSlots())
                 if (auto cc = slot->getClip())
-                    addClip (cc);
+                    addClipTree (addClipTree, cc);
     }
 
     automation.clear();
