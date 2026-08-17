@@ -270,6 +270,7 @@ void ContainerClipNode::process (ProcessContext& pc)
 ObjAuxReturnNode::ObjAuxReturnNode (ProcessState& editProcessState,
                                     std::shared_ptr<tracktion::graph::Node> dependencyToUse,
                                     std::vector<Plugin::Ptr> sendersToUse,
+                                    std::vector<Plugin::Ptr> auxChainPlugins,
                                     TimeRange auxTimeRange,
                                     int numChannelsToUse,
                                     size_t nodeIDToUse,
@@ -277,6 +278,7 @@ ObjAuxReturnNode::ObjAuxReturnNode (ProcessState& editProcessState,
     : TracktionEngineNode (editProcessState),
       dependency (std::move (dependencyToUse)),
       senderPlugins (std::move (sendersToUse)),
+      chainPlugins (std::move (auxChainPlugins)),
       auxRange (auxTimeRange),
       numChannels (std::max (1, numChannelsToUse)),
       auxNodeID (nodeIDToUse),
@@ -425,6 +427,39 @@ void ObjAuxReturnNode::process (ProcessContext& pc)
 {
     auto destAudio = pc.buffers.audio;
     destAudio.clear();
+
+    // Purge des queues de la chaîne d'aux sur discontinuité.
+    //
+    // Cette branche vit dans le graphe INTERNE du container, lequel n'est processé que dans la
+    // fenêtre de celui-ci. Hors fenêtre, une réverbe d'aux ne décroît donc pas : elle GÈLE, et
+    // repart telle quelle à la réactivation suivante. En boucle, avec un groupe plus court que
+    // la boucle, on réentendait au tour suivant la queue du tour précédent — comme une réverbe
+    // qu'on aurait mise en pause. Un tour de boucle repart d'une chaîne propre.
+    //
+    // Un seul test suffit à couvrir les trois cas : la fin du dernier bloc traité. Elle ne
+    // coïncide avec le début du bloc courant que si le temps s'est écoulé normalement — ni
+    // rebouclage (le playhead local recule), ni saut du transport, ni passage hors fenêtre
+    // (où l'on n'est pas appelé du tout).
+    // À l'arrêt on ne juge rien : le transport rejoue la même tranche de temps bloc après bloc,
+    // qu'on prendrait pour une discontinuité permanente — et on purgerait à chaque bloc. On ne
+    // mémorise pas non plus la position : reprendre une lecture mise en pause repart forcément
+    // du dernier bloc joué, donc de la queue là où elle en était, ce qui est le sens de « pause ».
+    if (getPlayHead().isPlaying())
+    {
+        const auto blockRange = getTimelineSampleRange();
+        // Tolérance : les bornes viennent d'une conversion depuis les beats, qui peut arrondir
+        // d'un échantillon. Une vraie discontinuité se compte en blocs, jamais en samples.
+        const bool contiguous = haveProcessedBlock
+                             && std::abs (blockRange.getStart() - lastBlockEndSample) <= 4;
+
+        if (! contiguous)
+            for (auto& p : chainPlugins)
+                if (p != nullptr)
+                    p->reset();
+
+        lastBlockEndSample = blockRange.getEnd();
+        haveProcessedBlock = true;
+    }
 
     const auto numDestFrames = (choc::buffer::FrameCount) destAudio.getNumFrames();
     const auto numDestChans  = (choc::buffer::ChannelCount) destAudio.getNumChannels();

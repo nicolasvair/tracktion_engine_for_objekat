@@ -113,6 +113,7 @@ public:
     ObjAuxReturnNode (ProcessState& editProcessState,
                       std::shared_ptr<tracktion::graph::Node> dependency,
                       std::vector<Plugin::Ptr> senders,
+                      std::vector<Plugin::Ptr> auxChainPlugins,
                       TimeRange auxTimeRange,
                       int numChannels,
                       size_t nodeID,
@@ -148,6 +149,16 @@ private:
     // Les Ptr tiennent les plugins en vie ; le vecteur parallèle évite un dynamic_cast par bloc.
     std::vector<Plugin::Ptr> senderPlugins;
     std::vector<ContainerAuxSend*> senders;
+
+    // Chaîne de FX de CET aux — elle vit en AVAL de ce nœud, mais c'est ici qu'on sait quand
+    // purger ses queues. @see le garde de contiguïté dans process().
+    std::vector<Plugin::Ptr> chainPlugins;
+    // Fin (en samples de la timeline locale) du dernier bloc traité. Sert à repérer les
+    // discontinuités : rebouclage, saut du transport, ou simple sortie de la fenêtre du
+    // container — auquel cas ce nœud n'est pas appelé du tout. Le booléen distingue « pas
+    // encore de bloc » d'une position (une sentinelle numérique déborderait à la soustraction).
+    int64_t lastBlockEndSample = 0;
+    bool    haveProcessedBlock = false;
     // Parallèle à `senders` : la ligne à retard de chacun (vide si son retard est nul).
     std::vector<TapDelay> tapDelays;
 

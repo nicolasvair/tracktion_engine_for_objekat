@@ -957,11 +957,21 @@ static std::unique_ptr<Node> createAuxReturns (const std::vector<PluginList*>& s
         hash_combine (nodeID, (size_t) 0x0B7A0E37);
         hash_combine (nodeID, auxClip->itemID.getRawID());
 
+        // Chaîne de FX de l'aux. Elle se branche en AVAL du nœud de retour, mais celui-ci en tient
+        // la liste : c'est lui qui voit les discontinuités et purge les queues. @see son process().
+        std::vector<Plugin::Ptr> chainPlugins;
+
+        if (params.includePlugins)
+            if (auto pluginList = auxClip->getPluginList())
+                for (auto p : *pluginList)
+                    chainPlugins.push_back (p);
+
         // La latence du nœud de CONTENU est la référence d'alignement des taps : c'est à cette
         // somme-là que le retour ira s'ajouter. @see ObjAuxReturnNode.
         std::unique_ptr<Node> returnNode = makeNode<ObjAuxReturnNode> (params.processState,
                                                                        sharedContent,
                                                                        sendersFor (auxClip->itemID),
+                                                                       std::move (chainPlugins),
                                                                        auxClip->getEditTimeRange(),
                                                                        numChannels,
                                                                        nodeID,
