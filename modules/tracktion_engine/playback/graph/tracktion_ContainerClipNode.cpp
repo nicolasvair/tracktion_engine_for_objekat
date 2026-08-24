@@ -200,8 +200,20 @@ void ContainerClipNode::process (ProcessContext& pc)
     localPlayHead.setReferenceSampleRange (pc.referenceSampleRange);
 
     // We don't want to update the playhead position as we'll do that manually below to avoid triggering playhead jumps
-    if (! loopRangeSamples.isEmpty() && localPlayHead.getLoopRange() != loopRangeSamples)
-        localPlayHead.setLoopRange (true, loopRangeSamples, false);
+    if (! loopRangeSamples.isEmpty())
+    {
+        if (localPlayHead.getLoopRange() != loopRangeSamples)
+            localPlayHead.setLoopRange (true, loopRangeSamples, false);
+    }
+    // Patch local Objekat — une plage VIDE veut dire « plus de boucle », et il faut le DIRE au
+    // playhead local. La branche ci-dessus ne sait qu'ARMER une boucle ; personne ne la
+    // désarmait jamais. Or ce playhead appartient au PlayerContext, que `prepareToPlay` reprend
+    // du graphe précédent pour garder la continuité : il SURVIT aux reconstructions. Couper la
+    // boucle d'un groupe (`ContainerClip::setLoopRange({})`, posé par updateGroupWindow:)
+    // reconstruisait donc bien le graphe, mais le playhead local continuait de replier — le
+    // groupe jouait en boucle jusqu'au redémarrage de l'app.
+    else if (localPlayHead.isLooping())
+        localPlayHead.setLoopRange (false, {}, false);
 
     // Syncronise positions
     const auto playheadOffset = toSamples (editStartTimeOfLocalTimeline, sampleRate);
