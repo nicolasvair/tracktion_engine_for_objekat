@@ -38,6 +38,7 @@
  #include <chrono>
  #include <cstdio>
  #include <cstdlib>
+ #include <mutex>
  #include <string>
 #endif
 
@@ -45,7 +46,7 @@
  #include <algorithm>
  #include <cstdlib>
  #include <map>
- #include <string>
+ #include <mutex>
  #include <string>
  #include <typeinfo>
  #include <vector>
@@ -305,6 +306,19 @@ namespace node_player_utils
                 ms (objT3, objT4));
 
             std::string objText (objLine);
+
+            // VERROU DE LA SONDE. prepareToPlay tourne sur PLUSIEURS threads à la fois : un
+            // Edit qui rebâtit son graphe pendant qu'un autre player (audition, preview) rebâtit
+            // le sien. Le journal en porte la preuve — les index sortent dans le désordre, un
+            // #145 lourd terminant après les #146…#162 qui l'ont doublé. Les états ci-dessous
+            // sont des statiques de fonction, donc PARTAGÉS par ces threads : le recensement
+            // précédent est une std::map, et deux threads qui l'assignent et la lisent en même
+            // temps corrompent le tas — une sonde de mesure qui tue le processus qu'elle mesure,
+            // et qui empoisonne tout diagnostic de plantage en Debug puisque la faute tombe
+            // n'importe où, longtemps après. Le verrou couvre AUSSI les deux écritures : deux
+            // relevés peuvent sortir dans le désordre, jamais entrelacés au milieu d'une ligne.
+            static std::mutex objProbeMutex;
+            const std::lock_guard<std::mutex> objProbeLock (objProbeMutex);
 
            #if OBJ_GRAPH_CENSUS
             // Mesuré après objT4 : ce recensement ne compte dans aucune des durées.
