@@ -1558,7 +1558,12 @@ std::unique_ptr<tracktion::graph::Node> createNodeForPlugin (Plugin& plugin, con
     const bool usesSidechain = plugin.getSidechainSourceID().isValid();
 
     if (! usesSidechain)
-        if (plugin.getOwnerTrack() != nullptr || plugin.getOwnerClip() != nullptr)
+        // OBJEKAT — `Clip::isClipState (parent)` plutôt que `getOwnerClip() != nullptr` : on ne
+        // demande ici QUE « ce plugin est-il sur un clip ? », et getOwnerClip répond en cherchant
+        // le clip dans tout l'Edit (findClipForID, O(N)) — O(N²) sur la reconstruction, 75 % de
+        // son temps sur PERREO WUB 2 (la chaîne de chaque objet vit sur la plugin-list de son
+        // clip). Le test sur l'arbre de valeurs donne la même réponse en O(1).
+        if (plugin.getOwnerTrack() != nullptr || Clip::isClipState (plugin.state.getParent()))
             maxNumChannels = effectivePluginChannels;
 
     // If the input has fewer channels than the plugin expects, pre-convert (e.g. mono→stereo)
