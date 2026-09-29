@@ -188,31 +188,6 @@ public:
     {
         if (tree == parent)
         {
-            // OBJEKAT: a batch (ClipList::sortClips) moves N children one by one; re-sorting
-            // the array at each move made it cubic. One sort at the end of the batch.
-            if (orderBatchDepth > 0)
-            {
-                orderChangedInBatch = true;
-                return;
-            }
-
-            {
-                const ScopedLockType sl (arrayLock);
-                sortArray();
-            }
-
-            objectOrderChanged();
-        }
-    }
-
-    void beginOrderBatch()  { ++orderBatchDepth; }
-
-    void endOrderBatch()
-    {
-        if (--orderBatchDepth == 0 && orderChangedInBatch)
-        {
-            orderChangedInBatch = false;
-
             {
                 const ScopedLockType sl (arrayLock);
                 sortArray();
@@ -256,23 +231,9 @@ protected:
         return -1;
     }
 
-    int orderBatchDepth = 0;
-    bool orderChangedInBatch = false;
-
     void sortArray()
     {
-        // OBJEKAT: each index is read once (O(N) each) instead of twice per comparison.
-        std::vector<std::pair<int, ObjectType*>> keyed;
-        keyed.reserve ((size_t) objects.size());
-
-        for (auto* o : objects)
-            keyed.emplace_back (parent.indexOf (o->state), o);
-
-        std::stable_sort (keyed.begin(), keyed.end(),
-                          [] (const auto& a, const auto& b) { return a.first < b.first; });
-
-        for (int i = 0; i < (int) keyed.size(); ++i)
-            objects.set (i, keyed[(size_t) i].second);
+        objects.sort (*this);
     }
 
 public:
