@@ -122,7 +122,9 @@ struct ClipOwner::ClipList : public ValueTreeObjectList<Clip>,
 
     void handleAsyncUpdate() override
     {
+        beginOrderBatch();
         sortClips (parent, &edit.getUndoManager());
+        endOrderBatch();
     }
 
     static void sortClips (juce::ValueTree& state, juce::UndoManager* um)
