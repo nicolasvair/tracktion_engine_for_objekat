@@ -566,7 +566,14 @@ public:
         }
 
         choc::buffer::copy (destBuffer, interleavedOutputScratchBuffer.getStart (numFramesToDo));
-        readPosition += numFramesToDo;
+
+        // `readPosition` is in the same frame as the argument of `setPosition()`: the clip's SOURCE
+        // time expressed in dest-rate samples (TimeRangeReader hands us `tr.getStart()` after
+        // EditToClipTimeReader scaled it by the clip speed). Producing numFramesToDo output frames
+        // consumes numFramesToDo * speedRatio of those, exactly as the TimeStretchReaders do. Without
+        // the factor, any speed != 1 made the next block's position differ by more than the
+        // `<= 1` tolerance of `setPosition()`, hence an `src_reset()` (a click) on EVERY block.
+        readPosition += static_cast<double> (numFramesToDo) * speedRatio;
 
         return true;
     }
