@@ -113,6 +113,7 @@ private:
             {
                 parameterListChanged = false;
                 pi->refreshParameterList();
+                valuesAwaitPlugin = askPluginToReannounceValues (*pi);
             }
 
             // refreshParameterList can delete the AudioProcessorParameter that our ExternalAutomatableParameters
@@ -134,8 +135,16 @@ private:
         // Annoyingly, because we can't tell the cause of the plugin change, we'll have to simply not
         // refresh parameter values if any modifiers have been assigned or they'll blow away the original
         // modifier values
-        if (! wasLatencyChange && ! hasAnyModifiers (plugin))
+        // ...nor right after an AudioUnit's list was rebuilt: its recreated parameters hold their
+        // DEFAULT values until the unit announces the real ones (see askPluginToReannounceValues), and
+        // relaying the defaults here would hand them to every listener as "changed by the plugin" —
+        // the very corruption the conditional rebuild above exists to prevent, on the one path it
+        // still left open (an AU that really posts kAudioUnitProperty_ParameterList, as some do when a
+        // state is restored). The real values arrive through the unit's own parameter events instead.
+        if (! wasLatencyChange && ! valuesAwaitPlugin && ! hasAnyModifiers (plugin))
             plugin.refreshParameterValues();
+
+        valuesAwaitPlugin = false;
 
         plugin.changed();
         plugin.edit.pluginChanged (plugin);
@@ -155,7 +164,40 @@ private:
         }
     }
 
+    // After AudioUnitPluginInstance::refreshParameterList(), every AUInstanceParameter is new and
+    // caches its DEFAULT value: JUCE does not re-read the unit there (it only does so on a program
+    // change or a state load, through its private sendAllParametersChangedEvents()). Reading
+    // getValue() now would therefore report the factory settings, not the plugin's. What JUCE's
+    // private helper does in its second half is public AudioToolbox API: notifying "any parameter"
+    // of the unit makes the AU event system deliver one ParameterValueChange per parameter, carrying
+    // the value it reads off the unit — and JUCE's own listener then updates each cache and notifies
+    // us (ExternalAutomatableParameter -> valueChangedByPlugin) with the REAL value. Nothing is
+    // written to the unit. Returns true when the values are left to those events (an AudioUnit),
+    // false for the formats whose getValue() reads the plugin live (VST2) or that never rebuild.
+    static bool askPluginToReannounceValues (juce::AudioPluginInstance& pi)
+    {
+       #if JUCE_MAC && JUCE_PLUGINHOST_AU
+        if (auto* au = pi.getAudioUnitClient())
+        {
+            if (auto unit = au->getAudioUnitHandle())
+            {
+                AudioUnitParameter any {};
+                any.mAudioUnit   = unit;
+                any.mParameterID = kAUParameterListener_AnyParameter;
+                any.mScope       = kAudioUnitScope_Global;
+                any.mElement     = 0;
+                AUParameterListenerNotify (nullptr, nullptr, &any);
+                return true;
+            }
+        }
+       #else
+        juce::ignoreUnused (pi);
+       #endif
+        return false;
+    }
+
     bool paramChanged = false, processorChanged = false, parameterListChanged = false;
+    bool valuesAwaitPlugin = false;
 };
 
 //==============================================================================

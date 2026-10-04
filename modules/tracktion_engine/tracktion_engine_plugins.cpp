@@ -15,6 +15,7 @@
  #define AudioBuffer DummyAudioBufferName
  #include <AudioUnit/AudioUnit.h>
  #include <AudioUnit/AUComponent.h>
+ #include <AudioToolbox/AudioUnitUtilities.h>
  #undef AudioBuffer
  #undef Point
 #endif
