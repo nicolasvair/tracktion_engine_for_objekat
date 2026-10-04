@@ -47,10 +47,15 @@ public:
         triggerAsyncUpdate();
     }
 
-    void audioProcessorChanged (juce::AudioProcessor*, const ChangeDetails&) override
+    void audioProcessorChanged (juce::AudioProcessor*, const ChangeDetails& details) override
     {
         if (plugin.edit.isLoading())
             return;
+
+        // Remember whether the parameter LIST itself changed: a program change, a state load or a
+        // latency change do not warrant rebuilding it (see updateFromPlugin()).
+        if (details.parameterInfoChanged)
+            parameterListChanged = true;
 
         processorChanged = true;
         triggerAsyncUpdate();
@@ -92,7 +97,23 @@ private:
                 plugin.edit.getTransport().triggerClearDevicesOnStop(); // This will fully re-initialise plugins
             }
 
-            pi->refreshParameterList();
+            // Only rebuild the parameter list when the plugin said the LIST changed
+            // (ChangeDetails::parameterInfoChanged). Doing it on every processor change is not
+            // harmless: for an AudioUnit, AudioUnitPluginInstance::refreshParameterList() recreates
+            // every AUInstanceParameter with its cached value set to the parameter's DEFAULT and
+            // without re-reading the unit. An AU that merely announces a new "present preset" (it
+            // does so, late, after a state has been restored) would then have its factory defaults
+            // relayed below by refreshParameterValues() as if the plugin had just changed them,
+            // overwriting real settings in whoever listens to the parameters (a host that mirrors
+            // them onto other instances ends up writing the defaults into those instances too).
+            // A program change needs no rebuild: JUCE has already resynchronised the cached values
+            // (AudioUnitPluginInstance::sendAllParametersChangedEvents), so refreshParameterValues()
+            // then relays the REAL values.
+            if (parameterListChanged)
+            {
+                parameterListChanged = false;
+                pi->refreshParameterList();
+            }
 
             // refreshParameterList can delete the AudioProcessorParameter that our ExternalAutomatableParameters
             // are listening too so re-attach any possibly deleted listeners here
@@ -134,7 +155,7 @@ private:
         }
     }
 
-    bool paramChanged = false, processorChanged = false;
+    bool paramChanged = false, processorChanged = false, parameterListChanged = false;
 };
 
 //==============================================================================
