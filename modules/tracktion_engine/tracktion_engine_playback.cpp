@@ -184,6 +184,7 @@ using namespace std::literals;
 #include "playback/graph/tracktion_ClickNode.h"
 #include "playback/graph/tracktion_CombiningNode.h"
 #include "playback/graph/tracktion_ContainerClipNode.h"
+#include "playback/graph/tracktion_ObjBridgeNodes.h"
 #include "playback/graph/tracktion_DynamicOffsetNode.h"
 #include "playback/graph/tracktion_FadeInOutNode.h"
 #include "playback/graph/tracktion_PluginNode.h"
@@ -222,6 +223,7 @@ using namespace std::literals;
 #include "playback/graph/tracktion_ClickNode.test.cpp"
 #include "playback/graph/tracktion_CombiningNode.cpp"
 #include "playback/graph/tracktion_ContainerClipNode.cpp"
+#include "playback/graph/tracktion_ObjBridgeNodes.cpp"
 #include "playback/graph/tracktion_DynamicOffsetNode.cpp"
 #include "playback/graph/tracktion_FadeInOutNode.cpp"
 #include "playback/graph/tracktion_InsertSendNode.cpp"
@@ -259,6 +261,7 @@ using namespace std::literals;
 
 #include "playback/graph/tracktion_EditNodeBuilder.h"
 #include "playback/graph/tracktion_EditNodeBuilder.cpp"
+#include "plugins/tracktion_ObjBridge.cpp"
 #include "playback/graph/tracktion_EditNodeBuilder.test.cpp"
 
 #include "playback/graph/tracktion_NodeRenderContext.h"

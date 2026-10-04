@@ -998,6 +998,26 @@ static std::unique_ptr<Node> createAuxReturns (const std::vector<PluginList*>& s
     return makeNode<tracktion::graph::SummingNode> (std::move (summedNodes));
 }
 
+// Patch local Objekat — the audio bridge's scheduling order. A combiner (a pool track's, or one of a
+// container's per-rank ones) is a unit the gates may wait for, and the units of rank >= 1 wait for
+// every unit of a lower rank: a reader in their clips reads what those write. Rank 0 gets no gate and
+// stays byte-identical to what it always was. A node that is not a CombiningNode is left alone.
+// @see CombiningNode::setBridgeRank, BridgeGateNode, docs/plan_sidechain.md §5.5
+static void applyBridgeRank (Node& node, int rank, EditItemID unitID, const CreateNodeParams& params)
+{
+    auto combiner = dynamic_cast<CombiningNode*> (&node);
+
+    if (combiner == nullptr)
+        return;
+
+    combiner->setBridgeRank (rank);
+
+    if (rank >= 1 && params.bridgeBuild != nullptr)
+        combiner->setOrderingGate (makeNode<BridgeGateNode> (rank,
+                                                             hash (hash ((size_t) 0x0B76A7E0, unitID.getRawID()), (size_t) rank),
+                                                             params.bridgeBuild));
+}
+
 std::unique_ptr<tracktion::graph::Node> createNodeForContainerClip (ContainerClip& clip, [[ maybe_unused ]] const TrackMuteState& trackMuteState,
                                                                     const CreateNodeParams& params, ClipRole role)
 {
@@ -1070,13 +1090,52 @@ std::unique_ptr<tracktion::graph::Node> createNodeForContainerClip (ContainerCli
     // retarde le reste, et rien n'a besoin d'élan. Le container fait pareil désormais.
     const auto pluginLatencyNumSamples = 0;
 
+    // Patch local Objekat — the audio bridge: a container's children may have different ranks (a
+    // child that reads a key written by a sibling must run after it), so each rank gets its own
+    // combiner. Rank 0 keeps the container's own id, and with every child at rank 0 (every session
+    // without a route) the content is the single combiner it always was. The sum equalises the
+    // combiners exactly as one combiner padded its lanes. senderPluginLists keeps the FULL list.
+    // @see docs/plan_sidechain.md §5.5, §5.6
+    auto contentNode = [&]() -> std::unique_ptr<Node>
+    {
+        std::map<int, juce::Array<Clip*>> clipsByRank;
+
+        for (auto c : clips)
+            clipsByRank[(int) c->state.getProperty (objbridge_ids::rank, 0)].add (c);
+
+        if (clipsByRank.size() == 1 && clipsByRank.begin()->first == 0)
+            return createNodeForClips (clip.itemID, clips, trackMuteState, params);
+
+        std::vector<std::unique_ptr<Node>> rankNodes;
+
+        for (auto& [rank, rankClips] : clipsByRank)      // ascending
+        {
+            const auto rankID = rank == 0 ? clip.itemID
+                                          : EditItemID::fromRawID (clip.itemID.getRawID() ^ (0x0B51D6E000000000ull + (uint64_t) rank));
+
+            if (auto n = createNodeForClips (rankID, rankClips, trackMuteState, params))
+            {
+                applyBridgeRank (*n, rank, rankID, params);
+                rankNodes.push_back (std::move (n));
+            }
+        }
+
+        if (rankNodes.empty())
+            return {};
+
+        if (rankNodes.size() == 1)
+            return std::move (rankNodes.front());
+
+        return std::make_unique<SummingNode> (std::move (rankNodes));
+    }();
+
     auto node = makeNode<ContainerClipNode> (params.processState,
                                              clip.itemID,
                                              BeatRange (clip.getStartBeat(), clip.getEndBeat()),
                                              clip.getOffsetInBeats(),
                                              clip.getLoopRangeBeats(),
                                              createAuxReturns (senderPluginLists (clips), auxClips,
-                                                               createNodeForClips (clip.itemID, clips, trackMuteState, params),
+                                                               std::move (contentNode),
                                                                params),
                                              pluginLatencyNumSamples);
    #endif
@@ -1191,6 +1250,21 @@ std::unique_ptr<tracktion::graph::Node> createNodeForClips (EditItemID trackID, 
             if (auto clipNode = createNodeForClip (*clip, trackMuteState, params, ClipRole::arranger))
             {
                 const auto latency = clipNode->getNodeProperties().latencyNumSamples;
+                // Patch local Objekat — invariant I1 of the audio bridge: no node reads ahead, so a tap's
+                // age is the true age of what it recorded. A clip that compensated its own latency
+                // (reading its material early) would make a tap on its chain report an age too high.
+                // @see docs/plan_sidechain.md §4.7
+               #if JUCE_DEBUG
+                if (params.bridgeBuild != nullptr && clip->compensatesOwnPluginLatency())
+                    if (auto* chain = clip->getPluginList())
+                        for (auto p : *chain)
+                            if (dynamic_cast<BridgeTapSource*> (p) != nullptr)
+                            {
+                                DBG ("[BRIDGE] read-ahead clip carries a tap: its age is wrong");
+                                jassertfalse;
+                            }
+               #endif
+
                 clipEntries.push_back ({ clip, std::move (clipNode), latency, {}, clip->compensatesOwnPluginLatency() });
             }
 
@@ -1383,7 +1457,11 @@ std::unique_ptr<tracktion::graph::Node> createClipsNode (AudioTrack& at, const T
     const auto& clips = at.getClips();
 
     if (auto clipsNode = createNodeForClips (trackID, clips, trackMuteState, params))
+    {
+        // Patch local Objekat — the pool track's rank. @see applyBridgeRank
+        applyBridgeRank (*clipsNode, (int) at.state.getProperty (objbridge_ids::rank, 0), trackID, params);
         arrangerNodes.push_back (std::move (clipsNode));
+    }
 
     if (auto araNode = createARAClipsNode (clips, trackMuteState, params))
         arrangerNodes.push_back (std::move (araNode));
@@ -1468,7 +1546,8 @@ std::unique_ptr<tracktion::graph::Node> createLiveInputsNode (AudioTrack& track,
     return std::make_unique<SummingNode> (std::move (nodes));
 }
 
-std::unique_ptr<tracktion::graph::Node> createSidechainInputNodeForPlugin (Plugin& plugin, std::unique_ptr<Node> node)
+std::unique_ptr<tracktion::graph::Node> createSidechainInputNodeForPlugin (Plugin& plugin, std::unique_ptr<Node> node,
+                                                                           const CreateNodeParams& params)
 {
     const auto sidechainSourceID = plugin.getSidechainSourceID();
     const bool usesSidechain = ! plugin.isMissing() && sidechainSourceID.isValid();
@@ -1508,8 +1587,39 @@ std::unique_ptr<tracktion::graph::Node> createSidechainInputNodeForPlugin (Plugi
     if (! directChannelMap.isIdentity())
         directInput = makeNode<ChannelRemappingNode> (std::move (directInput), std::move (directChannelMap));
 
-    auto sidechainInput = makeNode<ReturnNode> (getSidechainBusID (sidechainSourceID),
-                                                std::make_optional (static_cast<size_t> (plugin.itemID.getRawID())));
+    std::unique_ptr<Node> sidechainInput;
+
+    // Patch local Objekat — the audio bridge. A key named by a tap plugin (not by a track) is read
+    // from the tap's ring instead of through a ReturnNode: the ring crosses the containers' boundaries,
+    // which an edge cannot. L_d is the age of the DIRECT input, read AFTER its channel pre-conversion
+    // (a ChannelRemappingNode keeps latency). Anything else falls through to the native path, so a
+    // sidechain naming a track still works. @see docs/plan_sidechain.md §4.2, §5.6
+    if (params.bridgeBuild != nullptr && params.bridgeBuild->hasTap (sidechainSourceID))
+    {
+        // A reader alone in a linear TimedNode chain would share one buffer with its own
+        // ChannelRemappingNode, whose explicit mapping ADDS into its destination: the key would be
+        // summed into itself. The app never produces it (guessSidechainRouting wires 0->0, 1->1).
+        if (! hasDirectChannels)
+        {
+            DBG ("[BRIDGE] reader without a direct channel: refused");
+            return directInput;
+        }
+
+        const auto readerIndex = params.bridgeBuild->registerReader (sidechainSourceID, plugin.itemID, &plugin,
+                                                                     BridgeBuild::Consumer::sidechain,
+                                                                     directInput->getNodeProperties().latencyNumSamples,
+                                                                     plugin.itemID.getRawID());
+        const int readerRank = (int) plugin.state.getProperty (objbridge_ids::rank, 0);
+
+        sidechainInput = makeNode<BridgeReaderNode> (params.processState, params.bridgeBuild, readerIndex, readerRank,
+                                                     hash ((size_t) 0x0B71D6E5, plugin.itemID.getRawID()));
+    }
+    else
+    {
+        sidechainInput = makeNode<ReturnNode> (getSidechainBusID (sidechainSourceID),
+                                               std::make_optional (static_cast<size_t> (plugin.itemID.getRawID())));
+    }
+
     sidechainInput = makeNode<ChannelRemappingNode> (std::move (sidechainInput), std::move (sidechainChannelMap));
 
     if (! hasDirectChannels)
@@ -1578,7 +1688,7 @@ std::unique_ptr<tracktion::graph::Node> createNodeForPlugin (Plugin& plugin, con
                                                                  ChannelMap::conversion (incomingChannels, pluginInputChannels));
     }
 
-    node = createSidechainInputNodeForPlugin (plugin, std::move (node));
+    node = createSidechainInputNodeForPlugin (plugin, std::move (node), params);
 
     // Create the PluginNode
     auto pluginNode = tracktion::graph::makeNode<PluginNode> (std::move (node),
@@ -1734,7 +1844,27 @@ std::unique_ptr<tracktion::graph::Node> createPluginNodeForList (PluginList& lis
         if (auto auxSend = dynamic_cast<ContainerAuxSend*> (p))
             auxSend->setTapLatencyNumSamples (node != nullptr ? node->getNodeProperties().latencyNumSamples : 0);
 
-        if (auto meterPlugin = dynamic_cast<LevelMeterPlugin*> (p))
+        // Patch local Objekat — a bridge tap: the plugin is never processed, a BridgeTapNode takes its
+        // place. It records the age of its input (the tap's age, which the readers align on) on the
+        // plugin, for the NEXT build to start from, and in this pass's registry for the readers of
+        // THIS pass. @see docs/plan_sidechain.md §4.3, §5.6
+        if (auto tap = dynamic_cast<BridgeTapSource*> (p))
+        {
+            if (node == nullptr)
+                continue;
+
+            const int age = node->getNodeProperties().latencyNumSamples;
+            const int rank = (int) p->state.getProperty (objbridge_ids::rank, -1);
+
+            tap->cachedAgeNumSamples = age;
+            tap->cachedAgeSampleRate = params.sampleRate;
+
+            if (params.bridgeBuild != nullptr)
+                params.bridgeBuild->registerTap (*p, *tap, age, rank);
+
+            node = makeNode<BridgeTapNode> (params.processState, std::move (node), p, *tap, params.bridgeBuild, rank);
+        }
+        else if (auto meterPlugin = dynamic_cast<LevelMeterPlugin*> (p))
         {
             node = makeNode<LevelMeasurerProcessingNode> (std::move (node), *meterPlugin);
         }
@@ -2494,7 +2624,51 @@ std::unique_ptr<tracktion::graph::Node> createMasterFadeInOutNode (Edit& edit,
 }
 
 //==============================================================================
-std::unique_ptr<tracktion::graph::Node> createNodeForEdit (EditPlaybackContext& epc, std::atomic<double>& audibleTimeToUpdate, const CreateNodeParams& params)
+// Patch local Objekat — the audio bridge's construction passes (docs/plan_sidechain.md §4.3).
+//
+// A reader must declare its latency X when it is CONSTRUCTED, but the true age of its tap is only
+// known once the tap is constructed too — and the builder may reach the destination before the
+// source (another track, another depth). So a reader declares X from the age its tap had at the
+// PREVIOUS build (cached on the tap plugin), and at the end of the pass BridgeBuild::finalise
+// checks every reader against the true ages. If one is late (X < true age) or over-declared
+// (X > what it needs), the pass is thrown away and built again, the taps now caching the truth.
+//
+// In steady state (ages unchanged) and for any key younger than its destination this costs no extra
+// pass. A discarded graph was never prepared, so dropping it on this thread is safe.
+// Renders converge in their own call: an export is never misaligned for want of a timer.
+static constexpr int maxBridgePasses = 8;
+
+template<typename BuildOnePass>
+static std::unique_ptr<tracktion::graph::Node> buildWithBridgePasses (Edit& edit, const CreateNodeParams& params,
+                                                                      BuildOnePass&& buildOnePass)
+{
+    const auto buildID = BridgeBuild::nextBuildID();
+    std::unique_ptr<tracktion::graph::Node> node;
+
+    for (int pass = 0;; ++pass)
+    {
+        auto build = std::make_shared<BridgeBuild> (edit, buildID, pass, params.sampleRate, params.blockSize);
+        auto passParams = params;
+        passParams.bridgeBuild = build;
+
+        node = buildOnePass (passParams);
+
+        const bool anotherPassNeeded = build->finalise();
+
+        if (! anotherPassNeeded || pass + 1 >= maxBridgePasses)
+        {
+            build->allocateRings();
+            build->publish();
+            break;
+        }
+
+        node.reset();
+    }
+
+    return node;
+}
+
+static std::unique_ptr<tracktion::graph::Node> createNodeForEditPass (EditPlaybackContext& epc, std::atomic<double>& audibleTimeToUpdate, const CreateNodeParams& params)
 {
     Edit& edit = epc.edit;
     auto& playHeadState = params.processState.playHeadState;
@@ -2700,14 +2874,10 @@ std::unique_ptr<tracktion::graph::Node> createNodeForEdit (EditPlaybackContext& 
     return finalNode;
 }
 
-std::unique_ptr<tracktion::graph::Node> createNodeForEdit (Edit& edit, const CreateNodeParams& originalParams)
+static std::unique_ptr<tracktion::graph::Node> createNodeForEditPass (Edit& edit, const CreateNodeParams& params)
 {
     std::vector<std::unique_ptr<tracktion::graph::Node>> trackNodes;
-    auto params = originalParams;
     auto& playHeadState = params.processState.playHeadState;
-
-    if (params.implicitlyIncludeSubmixChildTracks && params.allowedTracks != nullptr)
-        *params.allowedTracks = addImplicitSubmixChildTracks (*params.allowedTracks);
 
     for (auto t : getAllTracks (edit))
     {
@@ -2740,6 +2910,30 @@ std::unique_ptr<tracktion::graph::Node> createNodeForEdit (Edit& edit, const Cre
     node = createRackNode (std::move (node), edit.getRackList(), params);
 
     return node;
+}
+
+std::unique_ptr<tracktion::graph::Node> createNodeForEdit (EditPlaybackContext& epc, std::atomic<double>& audibleTimeToUpdate, const CreateNodeParams& params)
+{
+    return buildWithBridgePasses (epc.edit, params,
+                                  [&] (const CreateNodeParams& passParams)
+                                  {
+                                      return createNodeForEditPass (epc, audibleTimeToUpdate, passParams);
+                                  });
+}
+
+std::unique_ptr<tracktion::graph::Node> createNodeForEdit (Edit& edit, const CreateNodeParams& originalParams)
+{
+    auto params = originalParams;
+
+    // Once, before the passes: the implicit submix children are added through the caller's array.
+    if (params.implicitlyIncludeSubmixChildTracks && params.allowedTracks != nullptr)
+        *params.allowedTracks = addImplicitSubmixChildTracks (*params.allowedTracks);
+
+    return buildWithBridgePasses (edit, params,
+                                  [&] (const CreateNodeParams& passParams)
+                                  {
+                                      return createNodeForEditPass (edit, passParams);
+                                  });
 }
 
 std::unique_ptr<tracktion::graph::Node> createGeneratorPluginNode (const Plugin::Ptr& plugin,

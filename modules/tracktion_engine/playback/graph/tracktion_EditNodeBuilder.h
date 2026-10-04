@@ -45,6 +45,8 @@ struct CreateNodeParams
     std::function<std::unique_ptr<graph::Node> (OutputDevice&,
                                                 const CreateNodeParams&,
                                                 std::unique_ptr<graph::Node>)> insertOptionalLastStageNodeForDevice = {};
+
+    std::shared_ptr<BridgeBuild> bridgeBuild;           /**< Objekat — the audio bridge's per-pass registry. Null outside createNodeForEdit: taps then pass through and readers are not built. */
 };
 
 //==============================================================================

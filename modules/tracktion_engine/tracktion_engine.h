@@ -516,6 +516,7 @@ namespace tracktion::inline engine
 #include "plugins/tracktion_PluginWindowState.h"
 #include "plugins/tracktion_Plugin.h"
 #include "plugins/tracktion_PluginList.h"
+#include "plugins/tracktion_ObjBridge.h"
 #include "plugins/tracktion_PluginManager.h"
 #include "utilities/tracktion_ParameterHelpers.h"
 

@@ -61,6 +61,20 @@ struct CombiningNode::TimedNode
         return nodesToProcess;
     }
 
+    // Patch local Objekat (pont audio) — la largeur la plus grande qu'un nœud INTERNE réclame. Elle
+    // peut dépasser celle du nœud de tête : un plugin à sidechain traite un buffer principal + clé
+    // (4 canaux), et un ChannelRemappingNode en tête le rogne à 2. Les buffers fournis ci-dessous
+    // doivent couvrir ce nœud-là, pas seulement la sortie de la chaîne.
+    int getMaxInternalChannels() const
+    {
+        int widest = 0;
+
+        for (auto n : nodesToProcess)
+            widest = std::max (widest, n->getNodeProperties().numberOfChannels);
+
+        return widest;
+    }
+
     void prepareToPlay (const tracktion::graph::PlaybackInitialisationInfo& info,
                         choc::buffer::ChannelArrayView<float> view)
     {
@@ -322,6 +336,11 @@ std::vector<Node*> CombiningNode::getInternalNodes()
 
 std::vector<tracktion::graph::Node*> CombiningNode::getDirectInputNodes()
 {
+    // The clips' chains are deliberately NOT inputs (see the class doc); only the bridge's
+    // ordering gate, when there is one, is an edge of the enclosing graph.
+    if (orderingGate != nullptr)
+        return { orderingGate.get() };
+
     return {};
 }
 
@@ -333,7 +352,14 @@ tracktion::graph::NodeProperties CombiningNode::getNodeProperties()
 void CombiningNode::prepareToPlay (const tracktion::graph::PlaybackInitialisationInfo& info)
 {
     isReadyToProcessBlock.store (true, std::memory_order_release);
-    tempAudioBuffer.resize (choc::buffer::Size::create ((choc::buffer::ChannelCount) nodeProperties.numberOfChannels,
+    // Patch local Objekat (pont audio) — wide enough for the widest INTERNAL node of any chain,
+    // not only for the chains' outputs (@see TimedNode::getMaxInternalChannels).
+    int bufferChannels = nodeProperties.numberOfChannels;
+
+    for (auto& i : inputs)
+        bufferChannels = std::max (bufferChannels, i->getMaxInternalChannels());
+
+    tempAudioBuffer.resize (choc::buffer::Size::create ((choc::buffer::ChannelCount) bufferChannels,
                                                         (choc::buffer::FrameCount) info.blockSize));
 
     for (auto& i : inputs)
@@ -357,7 +383,8 @@ void CombiningNode::prepareToPlay (const tracktion::graph::PlaybackInitialisatio
 
 bool CombiningNode::isReadyToProcess()
 {
-    return isReadyToProcessBlock.load (std::memory_order_acquire);
+    return (orderingGate == nullptr || orderingGate->hasProcessed())
+            && isReadyToProcessBlock.load (std::memory_order_acquire);
 }
 
 void CombiningNode::prefetchBlock (juce::Range<int64_t> referenceSampleRange)

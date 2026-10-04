@@ -19,7 +19,8 @@ namespace tracktion::inline engine {
     play position.
 */
 class CombiningNode final : public tracktion::graph::Node,
-                            public TracktionEngineNode
+                            public TracktionEngineNode,
+                            public BridgeRankedNode
 {
 public:
     CombiningNode (EditItemID, ProcessState&);
@@ -46,6 +47,22 @@ public:
 
     /** Returns the number of inputs added. */
     int getNumInputs() const;
+
+    //==============================================================================
+    // Objekat — the audio bridge's scheduling order (docs/plan_sidechain.md §5.4, §5.5).
+    // A combiner is a unit the bridge's gates may wait for, and may itself wait for a gate:
+    // a reader inside its clips reads a key that a LOWER-rank unit writes, so the lower rank
+    // has to have finished the block first. Construction only.
+
+    /** The bridge rank of this combiner. Default 0: every existing pool track is a gate target
+        for a rank >= 1, which is what makes "everything below me" right with no list of names. */
+    void setBridgeRank (int newRank)                    { bridgeRank = newRank; }
+
+    /** A node this combiner must wait for before processing (a BridgeGateNode). Its output is
+        ignored: it is a pure ordering edge. With none set, the combiner is exactly what it was. */
+    void setOrderingGate (std::unique_ptr<tracktion::graph::Node> gate)     { orderingGate = std::move (gate); }
+
+    int getBridgeRank() const override                  { return bridgeRank; }
 
     /** Returns the inputs that have been added.
         N.B. This is a bit of a temporary hack to ensure WaveNodes can access previous
@@ -74,6 +91,9 @@ private:
     MidiMessageArray noteOffEventsToSend;
 
     tracktion::graph::NodeProperties nodeProperties;
+
+    int bridgeRank = 0;
+    std::unique_ptr<tracktion::graph::Node> orderingGate;
 
     void prefetchGroup (juce::Range<int64_t>, TimeRange, BeatRange);
     void queueNoteOffsForClipsNoLongerPresent (const CombiningNode&);
