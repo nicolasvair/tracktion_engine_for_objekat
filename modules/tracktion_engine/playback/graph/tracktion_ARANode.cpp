@@ -131,6 +131,11 @@ tracktion::graph::NodeProperties ARANode::getNodeProperties()
     props.hasAudio = true;
     props.numberOfChannels = fileInfo.numChannels;
 
+    // Patch local Objekat — 0038 : un identifiant stable, dérivé du clip, pour que le graphe reconnaisse
+    // ce nœud d'une reconstruction à l'autre (comme un WaveNodeRealTime). Constante « ara » mélangée,
+    // pour ne jamais entrer en collision avec un autre nœud portant le même EditItemID.
+    props.nodeID = std::max<size_t> (1, (size_t) (clip.itemID.getRawID() ^ 0x41524100ull));
+
     if (auto plugin = araProxy->getPlugin())
         if (auto p = plugin->getAudioPluginInstance())
             props.numberOfChannels = juce::jmax (props.numberOfChannels, p->getTotalNumInputChannels(), p->getTotalNumOutputChannels());

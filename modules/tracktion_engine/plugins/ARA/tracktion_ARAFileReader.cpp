@@ -713,9 +713,12 @@ private:
                     // Only rebuild when the region layout (loop mode / repeat count) no
                     // longer matches the clip - a rebuild is a remove-all/re-add the
                     // plugin can see and hear, so it mustn't happen for no-op updates
+                    // Patch local Objekat — 0038 : ... ou quand la piste propriétaire du clip a changé
+                    // (clip enfant d'un container déplacé sur une autre piste).
                     if (! playbackRegionAndSource->playbackRegionLayoutMatches (clip.isLooping(),
                                                                                 clip.getPosition().getLength().inSeconds(),
-                                                                                clip.getLoopLength().inSeconds()))
+                                                                                clip.getLoopLength().inSeconds())
+                         || ! playbackRegionAndSource->owningTrackMatches())
                     {
                         const ScopedDocumentEditor sde (*this, true);
 
@@ -1130,7 +1133,8 @@ struct ARADocumentHolder::Pimpl
             if (hashString.isEmpty())
                 return true;
 
-            auto track = c->getTrack();
+            // Patch local Objekat — 0038 : la piste propriétaire, pas le parent direct (container)
+            auto track = ARAClipPlayer::getOwningTrackForARA (*c);
             if (track == nullptr)
                 return true;
 

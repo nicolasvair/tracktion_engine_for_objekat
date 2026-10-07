@@ -486,188 +486,215 @@ std::unique_ptr<tracktion::graph::Node> createNodeForAudioClip (AudioClipBase& c
     if (playFile.isNull())
         return {};
 
+    std::unique_ptr<Node> node;
+
     // Check if ARA should be used
     if (clip.isUsingARA())
     {
-        if (includeARA)
-        {
-            if (! clip.setupARA (true))
-                return {};
+        if (! includeARA)
+            return {};
 
-            jassert (clip.getARAProxy() != nullptr);
-            return makeNode<ARANode> (clip, playHeadState.playHead, params.forRendering);
-        }
+        if (! clip.setupARA (true))
+            return {};
 
-        return {}; // the ARA node creation will be handled by the track to allow live-play...
-    }
+        jassert (clip.getARAProxy() != nullptr);
 
-    clip.tearDownARA();
-
-    // Otherwise use audio file
-    auto original = clip.getAudioFile();
-
-    // Trigger proxy render if it needs it
-    clip.beginRenderingNewProxyIfNeeded();
-
-    std::unique_ptr<Node> node;
-
-    if (clip.canUseProxy())
-    {
-        assert (role != ClipRole::launcher);
-        assert (! clipTimeRangeToUse.isBeats());
-        TimeDuration nodeOffset;
-        double speed = 1.0;
-        TimeRange loopRange;
-
-        if (! clip.usesTimeStretchedProxy())
-        {
-            nodeOffset = clip.getPosition().getOffset();
-            loopRange = clip.getLoopRange();
-            speed = clip.getSpeedRatio();
-        }
-
-        const auto channelConfig = clip.getOutputChannelConfiguration();
-
-        if ((clip.getFadeInBehaviour() == AudioClipBase::speedRamp && clip.getFadeIn() != 0_td)
-            || (clip.getFadeOutBehaviour() == AudioClipBase::speedRamp && clip.getFadeOut() != 0_td))
-        {
-            SpeedFadeDescription desc;
-            const auto clipPos = clip.getPosition();
-
-            if (clip.getFadeInBehaviour() == AudioClipBase::speedRamp)
-            {
-                desc.inTimeRange = TimeRange (clipPos.getStart(), clip.getFadeIn());
-                desc.fadeInType = clip.getFadeInType();
-            }
-            else
-            {
-                desc.inTimeRange = TimeRange (clipPos.getStart(), TimeDuration());
-            }
-
-            if (clip.getFadeOutBehaviour() == AudioClipBase::speedRamp)
-            {
-                desc.outTimeRange = TimeRange (clipPos.getEnd() - clip.getFadeOut(), clip.getFadeOut());
-                desc.fadeOutType = clip.getFadeOutType();
-            }
-            else
-            {
-                desc.outTimeRange = TimeRange (clipPos.getEnd(), TimeDuration());
-            }
-
-            node = tracktion::graph::makeNode<SpeedRampWaveNode> (playFile,
-                                                                  toTime (clipTimeRangeToUse, clip.edit.tempoSequence),
-                                                                  nodeOffset,
-                                                                  loopRange,
-                                                                  clip.getLiveClipLevel(),
-                                                                  speed,
-                                                                  channelConfig,
-                                                                  ChannelConfiguration::discreteChannels (channelConfig.getNumChannels()),
-                                                                  params.processState,
-                                                                  idToUse,
-                                                                  params.forRendering,
-                                                                  desc);
-        }
-        else
-        {
-            node = tracktion::graph::makeNode<WaveNode> (playFile,
-                                                         toTime (clipTimeRangeToUse, clip.edit.tempoSequence),
-                                                         nodeOffset,
-                                                         loopRange,
-                                                         clip.getLiveClipLevel(),
-                                                         speed,
-                                                         channelConfig,
-                                                         ChannelConfiguration::discreteChannels (channelConfig.getNumChannels()),
-                                                         params.processState,
-                                                         idToUse,
-                                                         params.forRendering,
-                                                         params.forRendering ? nullptr : clip.getPlayhead());
-        }
+        // Patch local Objekat — 0038 : l'ARANode est la SOURCE du clip. Il suit la même queue qu'un
+        // fichier (plugins du clip, puis fondu), au lieu de sortir nu comme dans l'arbre d'origine.
+        node = makeNode<ARANode> (clip, playHeadState.playHead, params.forRendering);
     }
     else
     {
-        const auto timeStretcherMode = clip.getActualTimeStretchMode();
-        const auto timeStretcherOpts = clip.elastiqueProOptions.get();
-        const auto readAhead = params.readAheadTimeStretchNodes ? WaveNodeRealTime::ReadAhead::yes
-                                                                : WaveNodeRealTime::ReadAhead::no;
+        clip.tearDownARA();
 
-        const auto speedFadeDesc = getSpeedFadeDescription (clip);
-        auto warpMap = getWarpMap (clip);
-        std::optional<tempo::Sequence::Position> editTempoPosition (speedFadeDesc.isEmpty() ? std::optional<tempo::Sequence::Position>() : createPosition (clip.edit.tempoSequence));
+        // Otherwise use audio file
+        auto original = clip.getAudioFile();
 
-        if (clip.getAutoTempo() || clip.getAutoPitch() || role == ClipRole::launcher)
+        // Trigger proxy render if it needs it
+        clip.beginRenderingNewProxyIfNeeded();
+
+        if (clip.canUseProxy())
         {
-            assert (clipTimeRangeToUse.isBeats());
-            std::vector<tempo::TempoChange> tempos;
-            std::vector<tempo::TimeSigChange> timeSigs;
-            std::vector<tempo::KeyChange> keyChanges;
-            auto syncTempo = WaveNodeRealTime::SyncTempo::no;
-            auto syncPitch = WaveNodeRealTime::SyncPitch::no;
+            assert (role != ClipRole::launcher);
+            assert (! clipTimeRangeToUse.isBeats());
+            TimeDuration nodeOffset;
+            double speed = 1.0;
+            TimeRange loopRange;
 
-            auto wi = clip.getWaveInfo();
-            auto& li = clip.getLoopInfo();
-
-            if (clip.getAutoTempo() && li.getNumBeats() > 0 && wi.hashCode != 0)
+            if (! clip.usesTimeStretchedProxy())
             {
-                tempos.push_back ({ 0_bp, li.getBpm (wi), 1.0 });
-                timeSigs.push_back ({ 0_bp, li.getNumerator(), li.getDenominator(), false });
-                syncTempo = WaveNodeRealTime::SyncTempo::yes;
-            }
-            else
-            {
-                tempos.push_back ({ 0_bp, 120.0, 0.0 });
-                timeSigs.push_back ({ 0_bp, 4, 4, false });
+                nodeOffset = clip.getPosition().getOffset();
+                loopRange = clip.getLoopRange();
+                speed = clip.getSpeedRatio();
             }
 
-            if (clip.getAutoPitch() && li.getRootNote() != -1)
-            {
-                keyChanges.push_back ({ 0_bp, { li.getRootNote(), 0 } });
-                syncPitch = WaveNodeRealTime::SyncPitch::yes;
-            }
+            const auto channelConfig = clip.getOutputChannelConfiguration();
 
-            tempo::Sequence seq (std::move (tempos),
-                                 std::move (timeSigs),
-                                 std::move (keyChanges),
-                                 clip.edit.engine.getEngineBehaviour().lengthOfOneBeatDependsOnTimeSignature() ? tempo::LengthOfOneBeat::dependsOnTimeSignature
-                                                                                                               : tempo::LengthOfOneBeat::isAlwaysACrotchet);
-
-            if (role == ClipRole::launcher)
+            if ((clip.getFadeInBehaviour() == AudioClipBase::speedRamp && clip.getFadeIn() != 0_td)
+                || (clip.getFadeOutBehaviour() == AudioClipBase::speedRamp && clip.getFadeOut() != 0_td))
             {
-                WaveNodeRealTime::BeatConfig config
+                SpeedFadeDescription desc;
+                const auto clipPos = clip.getPosition();
+
+                if (clip.getFadeInBehaviour() == AudioClipBase::speedRamp)
                 {
-                    .processState = params.processState,
-                    .audioFile = playFile,
-                    .timeStretchMode = timeStretcherMode,
-                    .elastiqueProOptions = timeStretcherOpts,
-                    .editTime = BeatRange (0_bp, BeatPosition::fromBeats (std::numeric_limits<double>::max())),
-                    .offset = clip.getOffsetInBeats(),
-                    .loopSection = clip.getLoopRangeBeats(),
-                    .liveClipLevel = clip.getLiveClipLevel(),
-                    .sourceChannelsToUse = clip.getActiveChannelConfiguration(),
-                    .destChannelsToFill = ChannelConfiguration::discreteChannels (clip.getActiveChannelConfiguration().getNumChannels()),
-                    .itemID = idToUse,
-                    .isOfflineRender = params.forRendering,
-                    .resamplingQuality = clip.getResamplingQuality(),
-                    .speedFadeDescription = speedFadeDesc,
-                    .editTempoSequence = std::move (editTempoPosition),
-                    .warpMap = std::move (warpMap),
-                    .sourceFileTempoMap = std::move (seq),
-                    .syncTempo = syncTempo,
-                    .syncPitch = syncPitch,
-                    .chordPitchSequence = getChordTrackSequenceIfRequired (clip),
-                    .pitchChangeSemitones = clip.getPitchChange(),
-                    .readAhead = readAhead,
-                    .playhead = params.forRendering ? nullptr : clip.getPlayhead()
-                };
-                node = makeNode<WaveNodeRealTime> (std::move (config));
+                    desc.inTimeRange = TimeRange (clipPos.getStart(), clip.getFadeIn());
+                    desc.fadeInType = clip.getFadeInType();
+                }
+                else
+                {
+                    desc.inTimeRange = TimeRange (clipPos.getStart(), TimeDuration());
+                }
+
+                if (clip.getFadeOutBehaviour() == AudioClipBase::speedRamp)
+                {
+                    desc.outTimeRange = TimeRange (clipPos.getEnd() - clip.getFadeOut(), clip.getFadeOut());
+                    desc.fadeOutType = clip.getFadeOutType();
+                }
+                else
+                {
+                    desc.outTimeRange = TimeRange (clipPos.getEnd(), TimeDuration());
+                }
+
+                node = tracktion::graph::makeNode<SpeedRampWaveNode> (playFile,
+                                                                      toTime (clipTimeRangeToUse, clip.edit.tempoSequence),
+                                                                      nodeOffset,
+                                                                      loopRange,
+                                                                      clip.getLiveClipLevel(),
+                                                                      speed,
+                                                                      channelConfig,
+                                                                      ChannelConfiguration::discreteChannels (channelConfig.getNumChannels()),
+                                                                      params.processState,
+                                                                      idToUse,
+                                                                      params.forRendering,
+                                                                      desc);
             }
             else
             {
+                node = tracktion::graph::makeNode<WaveNode> (playFile,
+                                                             toTime (clipTimeRangeToUse, clip.edit.tempoSequence),
+                                                             nodeOffset,
+                                                             loopRange,
+                                                             clip.getLiveClipLevel(),
+                                                             speed,
+                                                             channelConfig,
+                                                             ChannelConfiguration::discreteChannels (channelConfig.getNumChannels()),
+                                                             params.processState,
+                                                             idToUse,
+                                                             params.forRendering,
+                                                             params.forRendering ? nullptr : clip.getPlayhead());
+            }
+        }
+        else
+        {
+            const auto timeStretcherMode = clip.getActualTimeStretchMode();
+            const auto timeStretcherOpts = clip.elastiqueProOptions.get();
+            const auto readAhead = params.readAheadTimeStretchNodes ? WaveNodeRealTime::ReadAhead::yes
+                                                                    : WaveNodeRealTime::ReadAhead::no;
+
+            const auto speedFadeDesc = getSpeedFadeDescription (clip);
+            auto warpMap = getWarpMap (clip);
+            std::optional<tempo::Sequence::Position> editTempoPosition (speedFadeDesc.isEmpty() ? std::optional<tempo::Sequence::Position>() : createPosition (clip.edit.tempoSequence));
+
+            if (clip.getAutoTempo() || clip.getAutoPitch() || role == ClipRole::launcher)
+            {
+                assert (clipTimeRangeToUse.isBeats());
+                std::vector<tempo::TempoChange> tempos;
+                std::vector<tempo::TimeSigChange> timeSigs;
+                std::vector<tempo::KeyChange> keyChanges;
+                auto syncTempo = WaveNodeRealTime::SyncTempo::no;
+                auto syncPitch = WaveNodeRealTime::SyncPitch::no;
+
+                auto wi = clip.getWaveInfo();
+                auto& li = clip.getLoopInfo();
+
+                if (clip.getAutoTempo() && li.getNumBeats() > 0 && wi.hashCode != 0)
+                {
+                    tempos.push_back ({ 0_bp, li.getBpm (wi), 1.0 });
+                    timeSigs.push_back ({ 0_bp, li.getNumerator(), li.getDenominator(), false });
+                    syncTempo = WaveNodeRealTime::SyncTempo::yes;
+                }
+                else
+                {
+                    tempos.push_back ({ 0_bp, 120.0, 0.0 });
+                    timeSigs.push_back ({ 0_bp, 4, 4, false });
+                }
+
+                if (clip.getAutoPitch() && li.getRootNote() != -1)
+                {
+                    keyChanges.push_back ({ 0_bp, { li.getRootNote(), 0 } });
+                    syncPitch = WaveNodeRealTime::SyncPitch::yes;
+                }
+
+                tempo::Sequence seq (std::move (tempos),
+                                     std::move (timeSigs),
+                                     std::move (keyChanges),
+                                     clip.edit.engine.getEngineBehaviour().lengthOfOneBeatDependsOnTimeSignature() ? tempo::LengthOfOneBeat::dependsOnTimeSignature
+                                                                                                                   : tempo::LengthOfOneBeat::isAlwaysACrotchet);
+
+                if (role == ClipRole::launcher)
+                {
+                    WaveNodeRealTime::BeatConfig config
+                    {
+                        .processState = params.processState,
+                        .audioFile = playFile,
+                        .timeStretchMode = timeStretcherMode,
+                        .elastiqueProOptions = timeStretcherOpts,
+                        .editTime = BeatRange (0_bp, BeatPosition::fromBeats (std::numeric_limits<double>::max())),
+                        .offset = clip.getOffsetInBeats(),
+                        .loopSection = clip.getLoopRangeBeats(),
+                        .liveClipLevel = clip.getLiveClipLevel(),
+                        .sourceChannelsToUse = clip.getActiveChannelConfiguration(),
+                        .destChannelsToFill = ChannelConfiguration::discreteChannels (clip.getActiveChannelConfiguration().getNumChannels()),
+                        .itemID = idToUse,
+                        .isOfflineRender = params.forRendering,
+                        .resamplingQuality = clip.getResamplingQuality(),
+                        .speedFadeDescription = speedFadeDesc,
+                        .editTempoSequence = std::move (editTempoPosition),
+                        .warpMap = std::move (warpMap),
+                        .sourceFileTempoMap = std::move (seq),
+                        .syncTempo = syncTempo,
+                        .syncPitch = syncPitch,
+                        .chordPitchSequence = getChordTrackSequenceIfRequired (clip),
+                        .pitchChangeSemitones = clip.getPitchChange(),
+                        .readAhead = readAhead,
+                        .playhead = params.forRendering ? nullptr : clip.getPlayhead()
+                    };
+                    node = makeNode<WaveNodeRealTime> (std::move (config));
+                }
+                else
+                {
+                    node = makeNode<WaveNodeRealTime> (playFile,
+                                                       timeStretcherMode, timeStretcherOpts,
+                                                       toBeats (clipTimeRangeToUse, clip.edit.tempoSequence),
+                                                       clip.getOffsetInBeats(),
+                                                       BeatRange (clip.getLoopStartBeats(), clip.getLoopLengthBeats()),
+                                                       clip.getLiveClipLevel(),
+                                                       clip.getActiveChannelConfiguration(),
+                                                       ChannelConfiguration::discreteChannels (clip.getActiveChannelConfiguration().getNumChannels()),
+                                                       params.processState,
+                                                       idToUse,
+                                                       params.forRendering,
+                                                       clip.getResamplingQuality(),
+                                                       speedFadeDesc, std::move (editTempoPosition),
+                                                       std::move (warpMap),
+                                                       seq, syncTempo, syncPitch,
+                                                       getChordTrackSequenceIfRequired (clip),
+                                                       clip.getPitchChange(),
+                                                       readAhead,
+                                                       params.forRendering ? nullptr : clip.getPlayhead());
+                }
+            }
+            else
+            {
+                assert (role != ClipRole::launcher);
+                assert (! clipTimeRangeToUse.isBeats());
                 node = makeNode<WaveNodeRealTime> (playFile,
-                                                   timeStretcherMode, timeStretcherOpts,
-                                                   toBeats (clipTimeRangeToUse, clip.edit.tempoSequence),
-                                                   clip.getOffsetInBeats(),
-                                                   BeatRange (clip.getLoopStartBeats(), clip.getLoopLengthBeats()),
+                                                   toTime (clipTimeRangeToUse, clip.edit.tempoSequence),
+                                                   clip.getPosition().getOffset(),
+                                                   clip.getLoopRange(),
                                                    clip.getLiveClipLevel(),
+                                                   clip.getSpeedRatio(),
                                                    clip.getActiveChannelConfiguration(),
                                                    ChannelConfiguration::discreteChannels (clip.getActiveChannelConfiguration().getNumChannels()),
                                                    params.processState,
@@ -675,35 +702,11 @@ std::unique_ptr<tracktion::graph::Node> createNodeForAudioClip (AudioClipBase& c
                                                    params.forRendering,
                                                    clip.getResamplingQuality(),
                                                    speedFadeDesc, std::move (editTempoPosition),
-                                                   std::move (warpMap),
-                                                   seq, syncTempo, syncPitch,
-                                                   getChordTrackSequenceIfRequired (clip),
+                                                   timeStretcherMode, timeStretcherOpts,
                                                    clip.getPitchChange(),
                                                    readAhead,
                                                    params.forRendering ? nullptr : clip.getPlayhead());
             }
-        }
-        else
-        {
-            assert (role != ClipRole::launcher);
-            assert (! clipTimeRangeToUse.isBeats());
-            node = makeNode<WaveNodeRealTime> (playFile,
-                                               toTime (clipTimeRangeToUse, clip.edit.tempoSequence),
-                                               clip.getPosition().getOffset(),
-                                               clip.getLoopRange(),
-                                               clip.getLiveClipLevel(),
-                                               clip.getSpeedRatio(),
-                                               clip.getActiveChannelConfiguration(),
-                                               ChannelConfiguration::discreteChannels (clip.getActiveChannelConfiguration().getNumChannels()),
-                                               params.processState,
-                                               idToUse,
-                                               params.forRendering,
-                                               clip.getResamplingQuality(),
-                                               speedFadeDesc, std::move (editTempoPosition),
-                                               timeStretcherMode, timeStretcherOpts,
-                                               clip.getPitchChange(),
-                                               readAhead,
-                                               params.forRendering ? nullptr : clip.getPlayhead());
         }
     }
 
@@ -1170,8 +1173,10 @@ std::unique_ptr<tracktion::graph::Node> createNodeForClip (Clip& clip, const Tra
     if (auto containerClip = dynamic_cast<ContainerClip*> (&clip))
         return createNodeForContainerClip (*containerClip, trackMuteState, params, role);
 
+    // Patch local Objekat — 0038 : un clip ARA entre comme un autre dans createNodeForClips (donc dans
+    // le CombiningNode de la piste OU du container : rangs, latence de lane, head/tail, allowedClips).
     if (auto audioClip = dynamic_cast<AudioClipBase*> (&clip))
-        return createNodeForAudioClip (*audioClip, false, params, role);
+        return createNodeForAudioClip (*audioClip, true, params, role);
 
     if (auto midiClip = dynamic_cast<MidiClip*> (&clip))
         return createNodeForMidiClip (*midiClip, trackMuteState, params, role);
@@ -1424,7 +1429,8 @@ std::unique_ptr<tracktion::graph::Node> createNodeForFrozenAudioTrack (AudioTrac
     return node;
 }
 
-std::unique_ptr<tracktion::graph::Node> createARAClipsNode (const juce::Array<Clip*>& clips, const TrackMuteState&, const CreateNodeParams& params)
+// Patch local Objekat — 0038 : n'est plus appelée (les clips ARA passent par createNodeForClips).
+[[maybe_unused]] std::unique_ptr<tracktion::graph::Node> createARAClipsNode (const juce::Array<Clip*>& clips, const TrackMuteState&, const CreateNodeParams& params)
 {
     juce::Array<AudioClipBase*> araClips;
 
@@ -1463,8 +1469,9 @@ std::unique_ptr<tracktion::graph::Node> createClipsNode (AudioTrack& at, const T
         arrangerNodes.push_back (std::move (clipsNode));
     }
 
-    if (auto araNode = createARAClipsNode (clips, trackMuteState, params))
-        arrangerNodes.push_back (std::move (araNode));
+    // Patch local Objekat — 0038 : plus de chemin ARA à part. createNodeForClips joue déjà les clips
+    // ARA (createNodeForClip → createNodeForAudioClip includeARA = true) ; un second appel les jouerait
+    // deux fois. @see createARAClipsNode
 
     if (! params.allowClipSlots)
     {

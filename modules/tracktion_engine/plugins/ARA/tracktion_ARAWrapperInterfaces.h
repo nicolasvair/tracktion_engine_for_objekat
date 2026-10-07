@@ -12,6 +12,32 @@ class MusicalContextWrapper;
 class RegionSequenceWrapper;
 class AudioSourceWrapper;
 
+// Patch local Objekat — 0038 : un clip dans un ContainerClip n'a pas de piste directe
+// (Clip::getTrack() == nullptr) ; sa séquence de régions est celle de la piste qui porte
+// le container le plus extérieur. Même règle que objOwningTrack côté app.
+static inline Track* getOwningTrackForARA (Clip& c)
+{
+    Clip* cl = &c;
+
+    while (cl != nullptr)
+    {
+        if (auto t = cl->getTrack())
+            return t;
+
+        cl = dynamic_cast<ContainerClip*> (cl->getParent());
+    }
+
+    return nullptr;
+}
+
+static inline EditItemID getOwningTrackIDForARA (Clip& c)
+{
+    if (auto t = getOwningTrackForARA (c))
+        return t->itemID;
+
+    return {};
+}
+
 ARA_MAP_HOST_REF(juce::MemoryOutputStream, ARAArchiveWriterHostRef)
 ARA_MAP_HOST_REF(juce::MemoryBlock, ARAArchiveReaderHostRef)
 ARA_MAP_HOST_REF(Edit, ARAContentAccessControllerHostRef, ARAModelUpdateControllerHostRef, ARAMusicalContextHostRef, ARARegionSequenceHostRef, ARAAudioModificationHostRef, ARAPlaybackRegionHostRef)
@@ -1545,14 +1571,21 @@ public:
                            const AudioModificationWrapper& audioModification)
       : doc (d),
         clip (audioClip),
-        trackID (audioClip.getTrack()->itemID),
+        trackID (getOwningTrackIDForARA (audioClip)),
         supportedFlags (factory.supportedPlaybackTransformationFlags),
         audioModificationRef (audioModification.audioModificationRef)
     {
         CRASH_TRACER
         TRACKTION_ASSERT_MESSAGE_THREAD
 
-        doc.willCreatePlaybackRegionOnTrack (clip.getTrack());
+        // Patch local Objekat — 0038 : sans piste propriétaire, aucune région n'est créée
+        // (playbackRegionRef reste nul) et PlaybackRegionAndSource ne la retient pas.
+        auto* owningTrack = getOwningTrackForARA (clip);
+
+        if (owningTrack == nullptr)
+            return;
+
+        doc.willCreatePlaybackRegionOnTrack (owningTrack);
 
         jassert (d.musicalContext != nullptr && d.musicalContext->musicalContextRef != nullptr);
         updatePlaybackRegionProperties();
@@ -1573,7 +1606,7 @@ public:
                            int loopIterationIndex)
       : doc (d),
         clip (audioClip),
-        trackID (audioClip.getTrack()->itemID),
+        trackID (getOwningTrackIDForARA (audioClip)),
         supportedFlags (factory.supportedPlaybackTransformationFlags),
         audioModificationRef (audioModification.audioModificationRef),
         isLoopIteration (true),
@@ -1582,7 +1615,14 @@ public:
         CRASH_TRACER
         TRACKTION_ASSERT_MESSAGE_THREAD
 
-        doc.willCreatePlaybackRegionOnTrack (clip.getTrack());
+        // Patch local Objekat — 0038 : sans piste propriétaire, aucune région n'est créée
+        // (playbackRegionRef reste nul) et PlaybackRegionAndSource ne la retient pas.
+        auto* owningTrack = getOwningTrackForARA (clip);
+
+        if (owningTrack == nullptr)
+            return;
+
+        doc.willCreatePlaybackRegionOnTrack (owningTrack);
 
         jassert (d.musicalContext != nullptr && d.musicalContext->musicalContextRef != nullptr);
         updatePlaybackRegionProperties();
@@ -1800,6 +1840,15 @@ public:
         return playbackRegions.size() == getNumLoopRegions (clipLengthSecs, loopLengthSecs);
     }
 
+    /** Patch local Objekat — 0038 : true si la piste propriétaire du clip est encore celle sur
+        laquelle les régions ont été créées (un groupe déplacé sur une autre lane change la piste
+        d'un clip enfant sans que sa mise en boucle bouge). */
+    bool owningTrackMatches() const
+    {
+        return playbackRegions.empty()
+                 || playbackRegions.front()->trackID == getOwningTrackIDForARA (clip);
+    }
+
     /** Rebuilds all playback regions based on whether the clip is looping.
         If looping, creates one PlaybackRegionWrapper per loop iteration.
         If not looping, creates a single region covering the whole clip. */
@@ -1826,6 +1875,11 @@ public:
             {
                 auto pr = std::make_unique<PlaybackRegionWrapper> (araDoc, clip, araFactory, *audioModification,
                                                                    (int) iteration);
+
+                // Patch local Objekat — 0038 : pas de piste propriétaire = pas de région
+                if (pr->playbackRegionRef == nullptr)
+                    continue;
+
                 addPlaybackRegion (*pr);
                 playbackRegions.push_back (std::move (pr));
             }
@@ -1833,8 +1887,13 @@ public:
         else
         {
             auto pr = std::make_unique<PlaybackRegionWrapper> (araDoc, clip, araFactory, *audioModification);
-            addPlaybackRegion (*pr);
-            playbackRegions.push_back (std::move (pr));
+
+            // Patch local Objekat — 0038 : pas de piste propriétaire = pas de région
+            if (pr->playbackRegionRef != nullptr)
+            {
+                addPlaybackRegion (*pr);
+                playbackRegions.push_back (std::move (pr));
+            }
         }
     }
 

@@ -18,6 +18,19 @@ namespace tracktion::inline engine {
 struct ARAClipPlayer;
 
 //==============================================================================
+// Patch local Objekat — 0038 : l'hôte peut intercepter les requêtes de transport d'un plugin ARA
+// (play/stop/position/boucle) au lieu de laisser le plugin piloter TransportControl directement.
+struct ARAHostTransportHook
+{
+    enum class Kind { start, stop, setPosition, setCycleRange, enableCycle };
+
+    /** Appelé sur le thread principal, avec (genre, a, b) :
+          setPosition → a = secondes ; setCycleRange → a = début, b = durée ; enableCycle → a = 0 ou 1.
+        Renvoie true si l'hôte a traité la requête (le comportement natif est alors sauté). */
+    static inline std::function<bool (Kind, double, double)> handler;
+};
+
+//==============================================================================
 /**
     Manages an ARA plugin instance for an audio clip.
 

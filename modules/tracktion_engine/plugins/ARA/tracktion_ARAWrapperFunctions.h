@@ -127,32 +127,61 @@ struct EditProxyFunctions
     static void ARA_CALL requestStartPlayback (ARAPlaybackControllerHostRef ref)
     {
         CRASH_TRACER
-        marshalToMessageThread (ref, [] (TransportControl& tc) { tc.play (false); });
+        marshalToMessageThread (ref, [] (TransportControl& tc)
+                                     {
+                                         if (ARAHostTransportHook::handler && ARAHostTransportHook::handler (ARAHostTransportHook::Kind::start, 0.0, 0.0))
+                                             return;
+
+                                         tc.play (false);
+                                     });
     }
 
     static void ARA_CALL requestStopPlayback (ARAPlaybackControllerHostRef ref)
     {
         CRASH_TRACER
-        marshalToMessageThread (ref, [] (TransportControl& tc) { tc.stop (false, false); });
+        marshalToMessageThread (ref, [] (TransportControl& tc)
+                                     {
+                                         if (ARAHostTransportHook::handler && ARAHostTransportHook::handler (ARAHostTransportHook::Kind::stop, 0.0, 0.0))
+                                             return;
+
+                                         tc.stop (false, false);
+                                     });
     }
 
     static void ARA_CALL requestSetPlaybackPosition (ARAPlaybackControllerHostRef ref, ARATimePosition timePosition)
     {
         CRASH_TRACER
-        marshalToMessageThread (ref, [timePosition] (TransportControl& tc) { tc.setPosition (TimePosition::fromSeconds (timePosition)); });
+        marshalToMessageThread (ref, [timePosition] (TransportControl& tc)
+                                     {
+                                         if (ARAHostTransportHook::handler && ARAHostTransportHook::handler (ARAHostTransportHook::Kind::setPosition, (double) timePosition, 0.0))
+                                             return;
+
+                                         tc.setPosition (TimePosition::fromSeconds (timePosition));
+                                     });
     }
 
     static void ARA_CALL requestSetCycleRange (ARAPlaybackControllerHostRef ref, ARATimePosition startTime, ARATimeDuration duration)
     {
         CRASH_TRACER
         marshalToMessageThread (ref, [startTime, duration] (TransportControl& tc)
-                                     { tc.setLoopRange ({ TimePosition::fromSeconds (startTime), TimeDuration::fromSeconds (duration) }); });
+                                     {
+                                         if (ARAHostTransportHook::handler && ARAHostTransportHook::handler (ARAHostTransportHook::Kind::setCycleRange, (double) startTime, (double) duration))
+                                             return;
+
+                                         tc.setLoopRange ({ TimePosition::fromSeconds (startTime), TimeDuration::fromSeconds (duration) });
+                                     });
     }
 
     static void ARA_CALL requestEnableCycle (ARAPlaybackControllerHostRef ref, ARABool enable)
     {
         CRASH_TRACER
-        marshalToMessageThread (ref, [enable] (TransportControl& tc) { tc.looping = enable != kARAFalse; });
+        marshalToMessageThread (ref, [enable] (TransportControl& tc)
+                                     {
+                                         if (ARAHostTransportHook::handler && ARAHostTransportHook::handler (ARAHostTransportHook::Kind::enableCycle, enable != kARAFalse ? 1.0 : 0.0, 0.0))
+                                             return;
+
+                                         tc.looping = enable != kARAFalse;
+                                     });
     }
 };
 
@@ -163,11 +192,17 @@ struct ModelUpdateFunctions
     {
         edit.markAsChanged();
 
-        for (auto track : getAudioTracks (edit))
-            for (auto clip : track->getClips())
-                if (auto audioClip = dynamic_cast<AudioClipBase*> (clip))
-                    if (auto proxy = audioClip->getARAProxy())
-                        proxy->contentHasChanged();
+        // Patch local Objekat — 0038 : visitAllTrackItems descend dans les ContainerClips ; l'ancienne
+        // boucle sur les clips directs des pistes ratait un clip ARA enfant d'un groupe (sa retouche
+        // n'aurait jamais marqué son archive périmée).
+        visitAllTrackItems (edit, [] (TrackItem& item)
+        {
+            if (auto audioClip = dynamic_cast<AudioClipBase*> (&item))
+                if (auto proxy = audioClip->getARAProxy())
+                    proxy->contentHasChanged();
+
+            return true;
+        });
     }
 
     /** These notifications arrive from inside our own notifyModelUpdates() call, so
