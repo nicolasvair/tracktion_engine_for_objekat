@@ -113,12 +113,66 @@ int BridgeBuild::registerReader (EditItemID tapPluginID, EditItemID destPluginID
     r.destPlugin = destPlugin;
     r.consumer = consumer;
     r.referenceLatency = referenceLatency;
+    r.cachedAge = cached;
     r.declared = objbridge::declaredLatency (referenceLatency, cached);
     r.groupKey = groupKey;
 
     readers.push_back (std::move (r));
     readerCounters.emplace_back();
     return (int) readers.size() - 1;
+}
+
+BridgeBuild::AuxReaders BridgeBuild::registerAuxReaders (EditItemID auxClipID,
+                                                         const std::vector<EditItemID>& sendPluginIDs,
+                                                         int referenceLatency)
+{
+    struct Found { EditItemID id; Plugin::Ptr plugin; int cached = -1; };
+    std::vector<Found> found;
+
+    // Looked up BEFORE the lock, like registerReader: the cache is the Edit's, not ours.
+    for (auto id : sendPluginIDs)
+    {
+        if (! hasTap (id))
+            continue;
+
+        auto p = edit.getPluginCache().getPluginFor (id);
+        auto* src = dynamic_cast<BridgeTapSource*> (p.get());
+
+        if (src == nullptr || src->getBridgeTargetAuxClipID() != auxClipID)
+            continue;
+
+        found.push_back ({ id, p, objbridge::scaleCachedAge (src->cachedAgeNumSamples, src->cachedAgeSampleRate, sampleRate) });
+    }
+
+    std::vector<int> cachedAges;
+
+    for (auto& f : found)
+        cachedAges.push_back (f.cached);
+
+    AuxReaders result;
+    result.declared = objbridge::declaredGroupLatency (referenceLatency, cachedAges.data(), (int) cachedAges.size());
+
+    const std::lock_guard<std::mutex> lock (mutex);
+
+    for (auto& f : found)
+    {
+        ReaderEntry r;
+        r.tapID = f.id;
+        r.destID = f.id;
+        r.auxID = auxClipID;
+        r.destPlugin = f.plugin;
+        r.consumer = Consumer::auxInput;
+        r.referenceLatency = referenceLatency;
+        r.cachedAge = f.cached;
+        r.declared = result.declared;
+        r.groupKey = auxClipID.getRawID();
+
+        readers.push_back (std::move (r));
+        readerCounters.emplace_back();
+        result.readers.push_back ((int) readers.size() - 1);
+    }
+
+    return result;
 }
 
 int BridgeBuild::getDeclaredLatency (int readerIndex) const
@@ -139,10 +193,13 @@ bool BridgeBuild::finalise()
     const std::lock_guard<std::mutex> lock (mutex);
     bool again = false;
 
-    // 1. Every reader, now that every tap of the pass exists (containers' content included: it is
-    //    constructed synchronously by createNodeForContainerClip).
+    // 1. Every sidechain reader, now that every tap of the pass exists (containers' content included:
+    //    it is constructed synchronously by createNodeForContainerClip).
     for (auto& r : readers)
     {
+        if (r.consumer != Consumer::sidechain)
+            continue;
+
         const TapEntry* tap = findTap (r.tapID);
 
         r.sourceAge = tap != nullptr ? tap->age : 0;
@@ -151,6 +208,43 @@ bool BridgeBuild::finalise()
         if (r.resolution.status == objbridge::ReaderStatus::late
              || r.resolution.status == objbridge::ReaderStatus::overDeclared)
             again = true;
+    }
+
+    // 2. Every aux return, as a whole: its readers share one declared X (objbridge::resolveGroup).
+    {
+        std::map<uint64_t, std::vector<size_t>> groups;      // aux clip -> its readers
+
+        for (size_t i = 0; i < readers.size(); ++i)
+            if (readers[i].consumer == Consumer::auxInput)
+                groups[readers[i].groupKey].push_back (i);
+
+        for (auto& [key, members] : groups)
+        {
+            juce::ignoreUnused (key);
+            const int n = (int) members.size();
+            std::unique_ptr<bool[]> built (new bool[(size_t) n]);       // std::vector<bool> has no data()
+            std::vector<int> ages ((size_t) n), cached ((size_t) n);
+            std::vector<objbridge::ReaderResolution> out ((size_t) n);
+
+            for (int k = 0; k < n; ++k)
+            {
+                auto& r = readers[members[(size_t) k]];
+                const TapEntry* tap = findTap (r.tapID);
+                built[(size_t) k] = tap != nullptr;
+                ages[(size_t) k] = tap != nullptr ? tap->age : 0;
+                cached[(size_t) k] = r.cachedAge;
+                r.sourceAge = ages[(size_t) k];
+            }
+
+            const auto& first = readers[members.front()];
+
+            if (objbridge::resolveGroup (first.referenceLatency, first.declared, built.get(),
+                                         ages.data(), cached.data(), n, out.data()))
+                again = true;
+
+            for (int k = 0; k < n; ++k)
+                readers[members[(size_t) k]].resolution = out[(size_t) k];
+        }
     }
 
     converged = ! again;
@@ -285,6 +379,7 @@ BridgeReport BridgeBuild::getReport() const
         BridgeReport::Reader out;
 
         out.plugin = r.destID;
+        out.aux = r.auxID;
         out.destInstance = juce::String::toHexString ((juce::int64) (intptr_t) r.destPlugin.get());
         out.tap = r.tapID;
         out.consumer = r.consumer == Consumer::sidechain ? "sidechain" : "auxInput";

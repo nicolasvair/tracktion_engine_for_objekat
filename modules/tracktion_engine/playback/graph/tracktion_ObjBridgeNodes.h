@@ -16,6 +16,11 @@ namespace tracktion::inline engine
 //==============================================================================
 /** A pass-through node that records its input into a ring, indexed by STREAM sample.
 
+    A SEND tap (BridgeTapSource::processesTapCopy) runs its plugin on the COPY it records — once per
+    block, never in sub-blocks, never on the signal that passes through — and writes the result:
+    that is the send level applied at the tap (docs/plan_sends_rework.md §A.2). Such a plugin is
+    initialised here like a PluginNode would, and its edit time is moved back by the input's age.
+
     It reports its input's properties unchanged (latency included): the tap's age is the age of
     its input, which is what the readers' arithmetic needs. It never relies on `numOutputNodes`
     (-1 inside a TimedNode: the trap that killed LatencyMaskingNode, patch 0019). */
@@ -29,7 +34,9 @@ public:
                    Plugin::Ptr tapPlugin,
                    BridgeTapSource&,   // the tap's persistent state; the ring is reached through BridgeBuild
                    std::shared_ptr<BridgeBuild>,
-                   int rank);
+                   int rank,
+                   double sampleRate, int blockSize, bool rendering);
+    ~BridgeTapNode() override;
 
     //==============================================================================
     tracktion::graph::NodeProperties getNodeProperties() override;
@@ -47,6 +54,14 @@ private:
     const int rank;
     const EditItemID tapID;
     std::shared_ptr<objbridge::Ring> ring;      // set in prepareToPlay, null = nobody reads this tap
+
+    // Copy mode (a send): the plugin runs on `scratch`, which is what the ring receives.
+    const bool copyMode;
+    const bool isRendering;
+    bool pluginInitialised = false;
+    TimeDuration automationAdjustmentTime;
+    juce::AudioBuffer<float> scratch;           // 2 channels, sized in prepareToPlay
+    MidiMessageArray midiScratch;
 };
 
 //==============================================================================

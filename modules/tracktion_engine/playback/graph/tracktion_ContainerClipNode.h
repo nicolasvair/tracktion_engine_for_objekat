@@ -117,7 +117,13 @@ public:
                       TimeRange auxTimeRange,
                       int numChannels,
                       size_t nodeID,
-                      int referenceLatencyNumSamples);
+                      int referenceLatencyNumSamples,
+                      // Patch 0039 — the BRIDGE sends: the readers (BridgeBuild::registerAuxReaders) that feed
+                      // this aux, one per send, and the latency X they share (>= the reference). Without a
+                      // build the node is the legacy one, byte for byte. docs/plan_sends_rework.md §A.2.
+                      std::shared_ptr<BridgeBuild> bridgeBuild = {},
+                      std::vector<int> bridgeReaderIndices = {},
+                      int declaredLatencyNumSamples = 0);
 
     //==============================================================================
     tracktion::graph::NodeProperties getNodeProperties() override;
@@ -171,6 +177,21 @@ private:
     const size_t auxNodeID;
     // Latence déclarée = celle du nœud de contenu auquel ce retour sera sommé. @see la doc.
     const int referenceLatency;
+
+    // Patch 0039 — les envois sur le PONT. Chaque lecteur lit l'anneau du tap d'un envoi, `delay`
+    // échantillons en arrière, et la somme se fait ici. `outputLatency` = la latence X partagée par le
+    // groupe (>= referenceLatency) : c'est elle que ce nœud déclare, et celle qui décale la fenêtre.
+    struct BridgeReaderState
+    {
+        int index = 0;
+        BridgeBuild::ReaderPlan plan;
+        BridgeBuild::Counters* counters = nullptr;
+    };
+
+    std::shared_ptr<BridgeBuild> bridge;
+    std::vector<BridgeReaderState> bridgeReaders;
+    juce::AudioBuffer<float> bridgeScratch;     // 2 canaux, dimensionné dans prepareToPlay
+    const int outputLatency;
 };
 
 

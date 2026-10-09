@@ -909,6 +909,28 @@ static std::vector<PluginList*> senderPluginLists (const juce::Array<Clip*>& cli
     return result;
 }
 
+// Patch 0039 — the BRIDGE sends of an aux: the send plugins the app listed on the aux clip
+// (objbridge_ids::sends, written in the same transaction as the sends themselves). Empty = the legacy
+// ContainerAuxSend path of this aux. @see docs/plan_sends_rework.md §A.2
+static std::vector<EditItemID> bridgeSendIDsOf (const ContainerClip& auxClip)
+{
+    std::vector<EditItemID> ids;
+
+    for (auto id : EditItemID::parseStringList (auxClip.state[objbridge_ids::sends].toString()))
+        ids.push_back (id);
+
+    return ids;
+}
+
+static bool anyAuxHasBridgeSends (const juce::Array<ContainerClip*>& auxClips)
+{
+    for (auto a : auxClips)
+        if (a->state[objbridge_ids::sends].toString().isNotEmpty())
+            return true;
+
+    return false;
+}
+
 static std::unique_ptr<Node> createAuxReturns (const std::vector<PluginList*>& senderLists,
                                                const juce::Array<ContainerClip*>& auxClips,
                                                std::unique_ptr<Node> contentNode,
@@ -969,6 +991,16 @@ static std::unique_ptr<Node> createAuxReturns (const std::vector<PluginList*>& s
                 for (auto p : *pluginList)
                     chainPlugins.push_back (p);
 
+        // Patch 0039 — the sends that go through the bridge: one reader per send plugin, all sharing the
+        // latency X declared here. The aux's legacy senders are looked up as before (the app puts none
+        // there on the bridge path, and nothing on the bridge path under OBJ_SENDS_LEGACY).
+        BridgeBuild::AuxReaders bridgeReaders;
+
+        if (params.bridgeBuild != nullptr)
+            if (auto ids = bridgeSendIDsOf (*auxClip); ! ids.empty())
+                bridgeReaders = params.bridgeBuild->registerAuxReaders (auxClip->itemID, ids,
+                                                                        contentProps.latencyNumSamples);
+
         // La latence du nœud de CONTENU est la référence d'alignement des taps : c'est à cette
         // somme-là que le retour ira s'ajouter. @see ObjAuxReturnNode.
         std::unique_ptr<Node> returnNode = makeNode<ObjAuxReturnNode> (params.processState,
@@ -978,7 +1010,10 @@ static std::unique_ptr<Node> createAuxReturns (const std::vector<PluginList*>& s
                                                                        auxClip->getEditTimeRange(),
                                                                        numChannels,
                                                                        nodeID,
-                                                                       contentProps.latencyNumSamples);
+                                                                       contentProps.latencyNumSamples,
+                                                                       params.bridgeBuild,
+                                                                       std::move (bridgeReaders.readers),
+                                                                       bridgeReaders.declared);
 
         if (params.includePlugins)
         {
@@ -1041,8 +1076,12 @@ std::unique_ptr<tracktion::graph::Node> createNodeForContainerClip (ContainerCli
     }
 
     // Un container sans contenu ne produit rien — même s'il porte des aux, personne ne leur
-    // enverrait quoi que ce soit.
-    if (clips.isEmpty())
+    // enverrait quoi que ce soit. Patch 0039 : SAUF si un aux du container reçoit des envois du pont
+    // (émetteur hors du container) : il lui faut alors un contenu, silencieux, auquel sommer son retour.
+    const bool auxOnlyWithBridgeSends = clips.isEmpty() && params.bridgeBuild != nullptr
+                                         && params.includePlugins && anyAuxHasBridgeSends (auxClips);
+
+    if (clips.isEmpty() && ! auxOnlyWithBridgeSends)
         return {};
 
    #if USE_DYNAMIC_OFFSET_CONTAINER_CLIP
@@ -1101,6 +1140,9 @@ std::unique_ptr<tracktion::graph::Node> createNodeForContainerClip (ContainerCli
     // @see docs/plan_sidechain.md §5.5, §5.6
     auto contentNode = [&]() -> std::unique_ptr<Node>
     {
+        if (auxOnlyWithBridgeSends)
+            return std::make_unique<tracktion::graph::SilentNode> (2);
+
         std::map<int, juce::Array<Clip*>> clipsByRank;
 
         for (auto c : clips)
@@ -1869,7 +1911,8 @@ std::unique_ptr<tracktion::graph::Node> createPluginNodeForList (PluginList& lis
             if (params.bridgeBuild != nullptr)
                 params.bridgeBuild->registerTap (*p, *tap, age, rank);
 
-            node = makeNode<BridgeTapNode> (params.processState, std::move (node), p, *tap, params.bridgeBuild, rank);
+            node = makeNode<BridgeTapNode> (params.processState, std::move (node), p, *tap, params.bridgeBuild, rank,
+                                            params.sampleRate, params.blockSize, params.forRendering);
         }
         else if (auto meterPlugin = dynamic_cast<LevelMeterPlugin*> (p))
         {

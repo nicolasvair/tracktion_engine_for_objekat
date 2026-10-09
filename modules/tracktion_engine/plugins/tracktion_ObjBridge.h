@@ -31,6 +31,12 @@ namespace objbridge_ids
 
     /** string: the model UUID a tap plugin serves (report only). */
     inline const juce::Identifier source ("objBridgeSource");
+
+    /** string, on an AUX clip: the comma-separated item ids of the send plugins (BridgeTapSource)
+        that feed it. Written by the app in the same transaction as the sends themselves; read by the
+        builder (createAuxReturns) to register one reader per send. Absent / empty = the legacy
+        ContainerAuxSend path. docs/plan_sends_rework.md §A.2. */
+    inline const juce::Identifier sends  ("objBridgeSends");
 }
 
 //==============================================================================
@@ -46,8 +52,9 @@ struct BridgeTapSource
     std::shared_ptr<objbridge::Ring> ring;     /**< Swapped only when it must GROW; old graphs keep theirs. */
     int    ringGeneration = 0;
 
-    // Phase 2 — a bridge SEND: the aux it targets (invalid for a sidechain tap), and whether the
-    // tap must run the plugin on its copy (the send level).
+    // A bridge SEND (docs/plan_sends_rework.md): the aux it targets (invalid for a sidechain tap), and
+    // whether the tap node must run the plugin on its COPY of the signal, once per block (the send
+    // level, applied at the tap: the signal passing through is never touched).
     virtual EditItemID getBridgeTargetAuxClipID() const     { return {}; }
     virtual bool processesTapCopy() const                   { return false; }
 };
@@ -87,7 +94,9 @@ struct BridgeReport
 
     struct Reader
     {
-        EditItemID plugin;                       // the destination plugin (the app maps it to its model UUID)
+        EditItemID plugin;                       // the destination plugin (the app maps it to its model UUID); for an
+                                                 // auxInput reader, the SEND plugin that feeds it
+        EditItemID aux;                          // auxInput only: the aux clip it belongs to
         juce::String destInstance;               // hex pointer of the live plugin: proves no reload across an undo
         EditItemID tap;
         juce::String consumer;                   // "sidechain" | "auxInput"
@@ -128,6 +137,21 @@ public:
         tap may be built after the reader, in another track or at another depth. */
     int  registerReader (EditItemID tapPluginID, EditItemID destPluginID, Plugin* destPlugin,
                          Consumer, int referenceLatency, uint64_t groupKey);
+
+    /** The readers of ONE aux return: one per send plugin in `sendPluginIDs` that exists in the Edit, is
+        a BridgeTapSource and targets `auxClipID`. They share ONE declared latency
+        X = max(referenceLatency, every tap's cached age) (objbridge::declaredGroupLatency), because the
+        return has a single output age; the group is resolved as a whole by finalise. `readers` are the
+        indices to hand to the return node, in the order of `sendPluginIDs`. A send whose plugin is gone
+        is dropped, not an error: the app's list is rewritten in the same transaction as the sends. */
+    struct AuxReaders
+    {
+        std::vector<int> readers;
+        int declared = 0;
+    };
+
+    AuxReaders registerAuxReaders (EditItemID auxClipID, const std::vector<EditItemID>& sendPluginIDs,
+                                   int referenceLatency);
 
     /** What the reader declares (X), fixed at registration. */
     int  getDeclaredLatency (int readerIndex) const;
@@ -197,8 +221,9 @@ private:
 
     struct ReaderEntry
     {
-        EditItemID tapID, destID;
+        EditItemID tapID, destID, auxID;
         Plugin::Ptr destPlugin;
+        int cachedAge = -1;                    // the tap's cached age as the reader was registered (scaled)
         Consumer consumer = Consumer::sidechain;
         int referenceLatency = 0, declared = 0;
         uint64_t groupKey = 0;

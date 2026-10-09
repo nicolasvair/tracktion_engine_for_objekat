@@ -293,9 +293,72 @@ inline ReaderResolution resolve (int referenceLatency, int declared, bool source
     return r;
 }
 
-// Phase 2 (an aux's input): every reader of one aux shares one declared X = max(ref, max cached),
-// and the group is late / over-declared as a whole. The signature is reserved here and implemented
-// in step 2.1 — nothing in phase 1 calls it.
+//==============================================================================
+// An aux return reads SEVERAL taps (one per send) and sums them: they share ONE declared latency X,
+// because the node has one output age. docs/plan_sends_rework.md §A.2.
+
+/** X for a group of readers: max(L_ref, every cached age). A negative cached age ("never built") asks
+    for nothing. */
+inline int declaredGroupLatency (int referenceLatency, const int* cachedAges, int numReaders) noexcept
+{
+    int x = std::max (0, referenceLatency);
+
+    for (int i = 0; i < numReaders; ++i)
+        x = std::max (x, cachedAges[i]);
+
+    return x;
+}
+
+/** What a group needs once the true ages are known. `built[i]` false = the tap was not built in this
+    pass (a restricted render): that reader is sourceAbsent and, because nothing will ever refresh its
+    cached age, its cached age stays a FLOOR of what the group needs — otherwise a stale high cache
+    would read as "over-declared" in every pass and never converge. `out` receives one resolution per
+    reader. Returns true if another pass is needed (any built reader late, or the group over-declared).
+    A group of one reader answers exactly what `resolve` answers. */
+inline bool resolveGroup (int referenceLatency, int declared, const bool* built, const int* trueAges,
+                          const int* cachedAges, int numReaders, ReaderResolution* out) noexcept
+{
+    int needed = std::max (0, referenceLatency);
+    bool anyLate = false;
+
+    for (int i = 0; i < numReaders; ++i)
+    {
+        if (built[i])
+        {
+            needed = std::max (needed, trueAges[i]);
+            anyLate = anyLate || trueAges[i] > declared;
+        }
+        else
+        {
+            needed = std::max (needed, cachedAges[i]);
+        }
+    }
+
+    const bool over = ! anyLate && declared > needed;
+
+    for (int i = 0; i < numReaders; ++i)
+    {
+        ReaderResolution r;
+
+        if (built[i])
+        {
+            if (trueAges[i] > declared)
+            {
+                r.status = ReaderStatus::late;
+                r.alignmentError = trueAges[i] - declared;
+            }
+            else
+            {
+                r.delay = declared - trueAges[i];
+                r.status = over ? ReaderStatus::overDeclared : ReaderStatus::aligned;
+            }
+        }
+
+        out[i] = r;
+    }
+
+    return anyLate || over;
+}
 
 /** Ring sizing: the next power of two >= maxDelay + 2 x blockSize, and >= 4 x blockSize. */
 inline int requiredRingCapacity (int maxDelay, int blockSize) noexcept

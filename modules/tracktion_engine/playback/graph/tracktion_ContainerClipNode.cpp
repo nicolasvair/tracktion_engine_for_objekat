@@ -286,7 +286,10 @@ ObjAuxReturnNode::ObjAuxReturnNode (ProcessState& editProcessState,
                                     TimeRange auxTimeRange,
                                     int numChannelsToUse,
                                     size_t nodeIDToUse,
-                                    int referenceLatencyNumSamples)
+                                    int referenceLatencyNumSamples,
+                                    std::shared_ptr<BridgeBuild> bridgeBuild,
+                                    std::vector<int> bridgeReaderIndices,
+                                    int declaredLatencyNumSamples)
     : TracktionEngineNode (editProcessState),
       dependency (std::move (dependencyToUse)),
       senderPlugins (std::move (sendersToUse)),
@@ -294,9 +297,15 @@ ObjAuxReturnNode::ObjAuxReturnNode (ProcessState& editProcessState,
       auxRange (auxTimeRange),
       numChannels (std::max (1, numChannelsToUse)),
       auxNodeID (nodeIDToUse),
-      referenceLatency (std::max (0, referenceLatencyNumSamples))
+      referenceLatency (std::max (0, referenceLatencyNumSamples)),
+      bridge (std::move (bridgeBuild)),
+      outputLatency (std::max (std::max (0, referenceLatencyNumSamples), declaredLatencyNumSamples))
 {
     assert (dependency);
+
+    if (bridge != nullptr)
+        for (auto index : bridgeReaderIndices)
+            bridgeReaders.push_back ({ index, {}, nullptr });
 
     for (auto& p : senderPlugins)
         if (auto send = dynamic_cast<ContainerAuxSend*> (p.get()))
@@ -323,7 +332,7 @@ tracktion::graph::NodeProperties ObjAuxReturnNode::getNodeProperties()
     // Ce que ce nœud émet est aussi vieux que ce que le nœud de contenu émet : les taps ont été
     // remis à cet âge-là un par un. Le déclarer est ce qui fait retomber juste l'égalisation
     // d'aval. @see la doc de la classe.
-    props.latencyNumSamples = referenceLatency;
+    props.latencyNumSamples = outputLatency;
     props.nodeID = auxNodeID;
 
     return props;
@@ -337,6 +346,16 @@ std::vector<tracktion::graph::Node*> ObjAuxReturnNode::getDirectInputNodes()
 
 void ObjAuxReturnNode::prepareToPlay (const tracktion::graph::PlaybackInitialisationInfo& info)
 {
+    // Patch 0039 — the plans exist once the pass is KEPT (rings sized, delays resolved).
+    for (auto& r : bridgeReaders)
+    {
+        r.plan = bridge->readerPlan (r.index);
+        r.counters = &bridge->counters (r.index);
+    }
+
+    if (! bridgeReaders.empty())
+        bridgeScratch.setSize (2, std::max (1, info.blockSize), false, true, false);
+
     for (auto& d : tapDelays)
     {
         if (d.numSamples <= 0)
@@ -497,6 +516,37 @@ void ObjAuxReturnNode::process (ProcessContext& pc)
         addTap (tap, numSamples, delay, destAudio);
     }
 
+    // Patch 0039 — les envois du pont : chacun lit l'anneau de son tap à (début de bloc − retard).
+    // Le niveau est déjà appliqué au tap ; ici on ne fait que sommer. Une lecture « torn » rend du
+    // silence (l'ordre du graphe a été violé), jamais un bloc à moitié écrit.
+    if (! bridgeReaders.empty() && (int) numDestFrames <= bridgeScratch.getNumSamples())
+    {
+        auto scratchView = tracktion::graph::toBufferView (bridgeScratch);
+        float* dest[2] = { bridgeScratch.getWritePointer (0), bridgeScratch.getWritePointer (1) };
+        const auto chans = std::min (numDestChans, (choc::buffer::ChannelCount) 2);
+
+        for (auto& r : bridgeReaders)
+        {
+            if (r.plan.ring == nullptr || r.plan.status == objbridge::ReaderStatus::sourceAbsent)
+                continue;
+
+            const auto result = r.plan.ring->read (pc.referenceSampleRange.getStart() - (int64_t) r.plan.delay,
+                                                   (int) numDestFrames, dest, 2);
+
+            r.counters->blocksRead.fetch_add (1, std::memory_order_relaxed);
+
+            if (result.framesCovered < (int) numDestFrames)
+                r.counters->blocksUncovered.fetch_add (1, std::memory_order_relaxed);
+
+            if (result.torn)
+                r.counters->blocksTorn.fetch_add (1, std::memory_order_relaxed);
+
+            if (result.framesCovered > 0 && ! result.torn)
+                choc::buffer::add (destAudio.getChannelRange ({ 0, chans }),
+                                   scratchView.getChannelRange ({ 0, chans }).getStart (numDestFrames));
+        }
+    }
+
     // Bornes de l'aux. Sans ça il sonnerait hors de sa propre fenêtre dès qu'un émetteur joue :
     // le nœud n'a pas de CombiningNode au-dessus de lui pour l'activer par tranches — c'est le
     // prix de l'arête de dépendance. Même geste que ContainerClipNode::process pour son contenu.
@@ -507,7 +557,7 @@ void ObjAuxReturnNode::process (ProcessContext& pc)
     // à ses plugins.
     {
         const auto sectionRange = getTimelineSampleRange();
-        const auto clipRange = toSamples (auxRange, getSampleRate()) + (SampleCount) referenceLatency;
+        const auto clipRange = toSamples (auxRange, getSampleRate()) + (SampleCount) outputLatency;
 
         auto numToClearAtStart = std::min (clipRange.getStart() - sectionRange.getStart(),
                                            (SampleCount) numDestFrames);

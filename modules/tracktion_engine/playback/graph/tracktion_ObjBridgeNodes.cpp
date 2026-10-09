@@ -17,21 +17,40 @@ namespace
 BridgeTapNode::BridgeTapNode (ProcessState& ps,
                               std::unique_ptr<tracktion::graph::Node> inputNode,
                               Plugin::Ptr tapPluginToUse,
-                              BridgeTapSource&,
+                              BridgeTapSource& source,
                               std::shared_ptr<BridgeBuild> buildToUse,
-                              int rankToUse)
+                              int rankToUse,
+                              double sampleRate, int blockSize, bool rendering)
     : TracktionEngineNode (ps),
       input (std::move (inputNode)),
       tapPlugin (std::move (tapPluginToUse)),
       build (std::move (buildToUse)),
       rank (rankToUse),
-      tapID (tapPlugin->itemID)
+      tapID (tapPlugin->itemID),
+      copyMode (source.processesTapCopy()),
+      isRendering (rendering)
 {
     jassert (input != nullptr);
+
+    if (copyMode)
+    {
+        // Plugin::applyToBufferWithAutomation asserts it was initialised; a PluginNode does it in its
+        // constructor, and so does this. The tap sits behind the input's age: automation reads the
+        // time the signal was MADE at, as PluginNode does.
+        tapPlugin->baseClassInitialise ({ 0_tp, sampleRate, blockSize });
+        pluginInitialised = true;
+        automationAdjustmentTime = TimeDuration::fromSamples (-input->getNodeProperties().latencyNumSamples, sampleRate);
+    }
 
     // The output IS the input (copied unless aliased): nothing to clear, the copy overwrites it.
     setOptimisations ({ tracktion::graph::ClearBuffers::no,
                         tracktion::graph::AllocateAudioBuffer::yes });
+}
+
+BridgeTapNode::~BridgeTapNode()
+{
+    if (pluginInitialised && ! tapPlugin->baseClassNeedsInitialising())
+        tapPlugin->baseClassDeinitialise();
 }
 
 tracktion::graph::NodeProperties BridgeTapNode::getNodeProperties()
@@ -57,10 +76,13 @@ bool BridgeTapNode::isReadyToProcess()
     return input->hasProcessed();
 }
 
-void BridgeTapNode::prepareToPlay (const tracktion::graph::PlaybackInitialisationInfo&)
+void BridgeTapNode::prepareToPlay (const tracktion::graph::PlaybackInitialisationInfo& info)
 {
     // The ring was sized by BridgeBuild::finalise; nothing is allocated here.
     ring = build != nullptr ? build->ringForTap (tapID) : nullptr;
+
+    if (copyMode)
+        scratch.setSize (2, std::max (1, info.blockSize), false, true, false);
 }
 
 void BridgeTapNode::process (ProcessContext& pc)
@@ -76,10 +98,57 @@ void BridgeTapNode::process (ProcessContext& pc)
         return;
 
     float* channels[2] = { nullptr, nullptr };
-    const int numChannels = std::min (2, (int) pc.buffers.audio.getNumChannels());
+    int numChannels = std::min (2, (int) pc.buffers.audio.getNumChannels());
 
-    for (int c = 0; c < numChannels; ++c)
-        channels[c] = pc.buffers.audio.getIterator ((choc::buffer::ChannelCount) c).sample;
+    if (copyMode)
+    {
+        // The send: the level is applied to a COPY, once for the whole block (Q8 of the sidechain plan: a
+        // plugin run in 128-sample sub-blocks overwrote its own tap). What passes through is untouched.
+        const int n = (int) pc.numSamples;
+
+        if (n > scratch.getNumSamples())
+            return;                                  // a block longer than prepared: write nothing
+
+        const int inChannels = (int) pc.buffers.audio.getNumChannels();
+
+        for (int c = 0; c < 2; ++c)
+        {
+            float* dst = scratch.getWritePointer (c);
+
+            if (inChannels <= 0)
+                juce::FloatVectorOperations::clear (dst, n);
+            else
+                juce::FloatVectorOperations::copy (dst, pc.buffers.audio.getIterator ((choc::buffer::ChannelCount) std::min (c, inChannels - 1)).sample, n);
+        }
+
+        if (tapPlugin->isEnabled())
+        {
+            const auto blockTime = getEditTimeRange();
+            const auto adjusted = TimeRange (blockTime.getStart() + automationAdjustmentTime,
+                                             blockTime.getEnd() + automationAdjustmentTime);
+            juce::AudioBuffer<float> view (scratch.getArrayOfWritePointers(), 2, n);
+
+            midiScratch.clear();
+            tapPlugin->prepareForNextBlock (adjusted.getStart());
+            tapPlugin->applyToBufferWithAutomation ({ &view, 0, n, &midiScratch, 0.0, adjusted,
+                                                      getPlayHeadState().playHead.isPlaying(),
+                                                      getPlayHeadState().playHead.isUserDragging(),
+                                                      isRendering, false });
+        }
+        else
+        {
+            scratch.clear (0, n);
+        }
+
+        channels[0] = scratch.getWritePointer (0);
+        channels[1] = scratch.getWritePointer (1);
+        numChannels = 2;
+    }
+    else
+    {
+        for (int c = 0; c < numChannels; ++c)
+            channels[c] = pc.buffers.audio.getIterator ((choc::buffer::ChannelCount) c).sample;
+    }
 
     // didPlayheadJump excludes loop wraps: a folding container keeps ONE run.
     ring->write (pc.referenceSampleRange.getStart(), (int) pc.numSamples,
