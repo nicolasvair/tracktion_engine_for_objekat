@@ -23,14 +23,21 @@ namespace tracktion::inline engine
 
     It reports its input's properties unchanged (latency included): the tap's age is the age of
     its input, which is what the readers' arithmetic needs. It never relies on `numOutputNodes`
-    (-1 inside a TimedNode: the trap that killed LatencyMaskingNode, patch 0019). */
+    (-1 inside a TimedNode: the trap that killed LatencyMaskingNode, patch 0019).
+
+    A send that carries plugins has a SECOND input, `wet`: the head node below, then the send's
+    mini-chain. The node is not a sum — what it outputs is still the dry input, untouched, and that
+    is what it declares; the wet is what the envelope (BridgeTapSource::processTapEnvelope) and the level
+    are applied to and what the ring receives, at the age the builder registered for it (the wet's own
+    latency). docs/plan_sends_rework.md §D.2.A. */
 class BridgeTapNode final : public tracktion::graph::Node,
                             public TracktionEngineNode,
                             public BridgeRankedNode
 {
 public:
     BridgeTapNode (ProcessState&,
-                   std::unique_ptr<tracktion::graph::Node> input,
+                   std::shared_ptr<tracktion::graph::Node> input,
+                   std::unique_ptr<tracktion::graph::Node> wet,     // null = no mini-chain
                    Plugin::Ptr tapPlugin,
                    BridgeTapSource&,   // the tap's persistent state; the ring is reached through BridgeBuild
                    std::shared_ptr<BridgeBuild>,
@@ -48,8 +55,10 @@ public:
     int getBridgeRank() const override                  { return rank; }
 
 private:
-    std::unique_ptr<tracktion::graph::Node> input;
+    std::shared_ptr<tracktion::graph::Node> input;      // shared with the head node when there is a wet
+    std::unique_ptr<tracktion::graph::Node> wet;
     Plugin::Ptr tapPlugin;
+    BridgeTapSource& source;
     std::shared_ptr<BridgeBuild> build;
     const int rank;
     const EditItemID tapID;
@@ -62,6 +71,27 @@ private:
     TimeDuration automationAdjustmentTime;
     juce::AudioBuffer<float> scratch;           // 2 channels, sized in prepareToPlay
     MidiMessageArray midiScratch;
+};
+
+//==============================================================================
+/** The head of a send's wet branch: a 2-channel COPY of the tapped signal, for the send's mini-chain to
+    process (the plugins must never write into what passes through). The second consumer of the tap's
+    input. Nothing else: the send's envelope and level come AFTER the mini-chain, in BridgeTapNode. */
+class BridgeTapHeadNode final : public tracktion::graph::Node,
+                                public TracktionEngineNode
+{
+public:
+    BridgeTapHeadNode (ProcessState&, std::shared_ptr<tracktion::graph::Node> input, EditItemID tapID);
+
+    //==============================================================================
+    tracktion::graph::NodeProperties getNodeProperties() override;
+    std::vector<tracktion::graph::Node*> getDirectInputNodes() override;
+    bool isReadyToProcess() override;
+    void process (ProcessContext&) override;
+
+private:
+    std::shared_ptr<tracktion::graph::Node> input;
+    const EditItemID tapID;
 };
 
 //==============================================================================

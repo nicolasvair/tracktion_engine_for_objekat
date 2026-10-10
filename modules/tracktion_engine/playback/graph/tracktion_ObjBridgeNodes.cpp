@@ -8,6 +8,7 @@ namespace tracktion::inline engine
 namespace
 {
     constexpr size_t bridgeTapMagicHash     = size_t (0x62726964676574);    // "bridget"
+    constexpr size_t bridgeHeadMagicHash    = size_t (0x62726964676568);    // "bridgeh"
     constexpr size_t bridgeReaderMagicHash  = size_t (0x62726964676572);    // "bridger"
     constexpr size_t bridgeGateMagicHash    = size_t (0x62726964676761);    // "bridgga"
     constexpr size_t gateCacheKey           = size_t (0x0B76A7E0C0DEull);   // TransformCache key
@@ -15,15 +16,18 @@ namespace
 
 //==============================================================================
 BridgeTapNode::BridgeTapNode (ProcessState& ps,
-                              std::unique_ptr<tracktion::graph::Node> inputNode,
+                              std::shared_ptr<tracktion::graph::Node> inputNode,
+                              std::unique_ptr<tracktion::graph::Node> wetNode,
                               Plugin::Ptr tapPluginToUse,
-                              BridgeTapSource& source,
+                              BridgeTapSource& sourceToUse,
                               std::shared_ptr<BridgeBuild> buildToUse,
                               int rankToUse,
                               double sampleRate, int blockSize, bool rendering)
     : TracktionEngineNode (ps),
       input (std::move (inputNode)),
+      wet (std::move (wetNode)),
       tapPlugin (std::move (tapPluginToUse)),
+      source (sourceToUse),
       build (std::move (buildToUse)),
       rank (rankToUse),
       tapID (tapPlugin->itemID),
@@ -31,6 +35,7 @@ BridgeTapNode::BridgeTapNode (ProcessState& ps,
       isRendering (rendering)
 {
     jassert (input != nullptr);
+    jassert (wet == nullptr || copyMode);        // a wet branch only makes sense for a send
 
     if (copyMode)
     {
@@ -39,7 +44,10 @@ BridgeTapNode::BridgeTapNode (ProcessState& ps,
         // time the signal was MADE at, as PluginNode does.
         tapPlugin->baseClassInitialise ({ 0_tp, sampleRate, blockSize });
         pluginInitialised = true;
-        automationAdjustmentTime = TimeDuration::fromSamples (-input->getNodeProperties().latencyNumSamples, sampleRate);
+        // With a wet branch the level is applied to the WET, whose age is its own latency (the input's
+        // plus the mini-chain's).
+        const int ageNumSamples = (wet != nullptr ? wet.get() : input.get())->getNodeProperties().latencyNumSamples;
+        automationAdjustmentTime = TimeDuration::fromSamples (-ageNumSamples, sampleRate);
     }
 
     // The output IS the input (copied unless aliased): nothing to clear, the copy overwrites it.
@@ -68,12 +76,15 @@ tracktion::graph::NodeProperties BridgeTapNode::getNodeProperties()
 
 std::vector<tracktion::graph::Node*> BridgeTapNode::getDirectInputNodes()
 {
+    if (wet != nullptr)
+        return { input.get(), wet.get() };
+
     return { input.get() };
 }
 
 bool BridgeTapNode::isReadyToProcess()
 {
-    return input->hasProcessed();
+    return input->hasProcessed() && (wet == nullptr || wet->hasProcessed());
 }
 
 void BridgeTapNode::prepareToPlay (const tracktion::graph::PlaybackInitialisationInfo& info)
@@ -109,7 +120,10 @@ void BridgeTapNode::process (ProcessContext& pc)
         if (n > scratch.getNumSamples())
             return;                                  // a block longer than prepared: write nothing
 
-        const int inChannels = (int) pc.buffers.audio.getNumChannels();
+        // What the envelope and the level are applied to: the wet branch's output when the send carries
+        // plugins, else a copy of what passes through.
+        auto copySource = wet != nullptr ? wet->getProcessedOutput().audio : pc.buffers.audio;
+        const int inChannels = (int) copySource.getNumChannels();
 
         for (int c = 0; c < 2; ++c)
         {
@@ -118,7 +132,7 @@ void BridgeTapNode::process (ProcessContext& pc)
             if (inChannels <= 0)
                 juce::FloatVectorOperations::clear (dst, n);
             else
-                juce::FloatVectorOperations::copy (dst, pc.buffers.audio.getIterator ((choc::buffer::ChannelCount) std::min (c, inChannels - 1)).sample, n);
+                juce::FloatVectorOperations::copy (dst, copySource.getIterator ((choc::buffer::ChannelCount) std::min (c, inChannels - 1)).sample, n);
         }
 
         if (tapPlugin->isEnabled())
@@ -127,6 +141,10 @@ void BridgeTapNode::process (ProcessContext& pc)
             const auto adjusted = TimeRange (blockTime.getStart() + automationAdjustmentTime,
                                              blockTime.getEnd() + automationAdjustmentTime);
             juce::AudioBuffer<float> view (scratch.getArrayOfWritePointers(), 2, n);
+
+            // The envelope, AFTER the send's plugins and before its level, at the wet's own age (so a
+            // latent mini-chain does not make the fade fall early on the wet).
+            source.processTapEnvelope (view, 0, n, adjusted);
 
             midiScratch.clear();
             tapPlugin->prepareForNextBlock (adjusted.getStart());
@@ -153,6 +171,67 @@ void BridgeTapNode::process (ProcessContext& pc)
     // didPlayheadJump excludes loop wraps: a folding container keeps ONE run.
     ring->write (pc.referenceSampleRange.getStart(), (int) pc.numSamples,
                  channels, numChannels, getPlayHeadState().didPlayheadJump());
+}
+
+//==============================================================================
+BridgeTapHeadNode::BridgeTapHeadNode (ProcessState& ps, std::shared_ptr<tracktion::graph::Node> inputNode,
+                                      EditItemID tapIDToUse)
+    : TracktionEngineNode (ps),
+      input (std::move (inputNode)),
+      tapID (tapIDToUse)
+{
+    jassert (input != nullptr);
+
+    // Every sample of the output is written by process.
+    setOptimisations ({ tracktion::graph::ClearBuffers::no,
+                        tracktion::graph::AllocateAudioBuffer::yes });
+}
+
+tracktion::graph::NodeProperties BridgeTapHeadNode::getNodeProperties()
+{
+    auto props = input->getNodeProperties();     // latency unchanged
+    props.hasAudio = true;
+    props.hasMidi = false;
+    props.numberOfChannels = 2;
+
+    if (props.nodeID != 0)
+    {
+        hash_combine (props.nodeID, (size_t) tapID.getRawID());
+        hash_combine (props.nodeID, bridgeHeadMagicHash);
+    }
+
+    return props;
+}
+
+std::vector<tracktion::graph::Node*> BridgeTapHeadNode::getDirectInputNodes()
+{
+    return { input.get() };
+}
+
+bool BridgeTapHeadNode::isReadyToProcess()
+{
+    return input->hasProcessed();
+}
+
+void BridgeTapHeadNode::process (ProcessContext& pc)
+{
+    auto sourceAudio = input->getProcessedOutput().audio;
+    const int n = (int) pc.numSamples;
+    const int inChannels = (int) sourceAudio.getNumChannels();
+
+    if (pc.buffers.audio.getNumChannels() < 2 || n <= 0)
+        return;
+
+    float* channels[2] = { pc.buffers.audio.getIterator (0).sample,
+                           pc.buffers.audio.getIterator (1).sample };
+
+    for (int c = 0; c < 2; ++c)
+    {
+        if (inChannels <= 0)
+            juce::FloatVectorOperations::clear (channels[c], n);
+        else
+            juce::FloatVectorOperations::copy (channels[c], sourceAudio.getIterator ((choc::buffer::ChannelCount) std::min (c, inChannels - 1)).sample, n);
+    }
 }
 
 //==============================================================================
