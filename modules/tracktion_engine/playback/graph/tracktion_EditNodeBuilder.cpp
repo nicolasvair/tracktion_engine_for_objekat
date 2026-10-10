@@ -1902,8 +1902,34 @@ std::unique_ptr<tracktion::graph::Node> createPluginNodeForList (PluginList& lis
             if (node == nullptr)
                 continue;
 
-            const int age = node->getNodeProperties().latencyNumSamples;
             const int rank = (int) p->state.getProperty (objbridge_ids::rank, -1);
+
+            // A send that carries plugins (docs/plan_sends_rework.md §D.2.A): the tapped signal is
+            // shared between the tap node (which passes it through, untouched) and a WET branch —
+            // head (the copy + what the send does before its plugins), the send's mini-chain, a gag
+            // for its residue. The tap's age is the wet's latency: the mini-chain's latency ages the
+            // tap, at the aux return, and never delays the signal that passes through.
+            PluginList* tapChain = p->isEnabled() ? tap->getTapChain() : nullptr;
+            bool hasTapChain = false;
+
+            if (tapChain != nullptr)
+                for (auto cp : *tapChain)
+                    if (cp->isEnabled())
+                        { hasTapChain = true; break; }
+
+            std::shared_ptr<Node> sharedInput (std::move (node));
+            std::unique_ptr<Node> wet;
+
+            if (hasTapChain)
+            {
+                wet = makeNode<BridgeTapHeadNode> (params.processState, sharedInput, p, *tap, params.sampleRate);
+                wet = createPluginNodeForList (*tapChain, trackMuteState, std::move (wet), playHeadState, params);
+
+                if (const int wetLatency = wet->getNodeProperties().latencyNumSamples; wetLatency > 0)
+                    wet = makeNode<LatencyPrimingNode> (std::move (wet), params.processState, wetLatency);
+            }
+
+            const int age = (wet != nullptr ? wet.get() : sharedInput.get())->getNodeProperties().latencyNumSamples;
 
             tap->cachedAgeNumSamples = age;
             tap->cachedAgeSampleRate = params.sampleRate;
@@ -1911,7 +1937,8 @@ std::unique_ptr<tracktion::graph::Node> createPluginNodeForList (PluginList& lis
             if (params.bridgeBuild != nullptr)
                 params.bridgeBuild->registerTap (*p, *tap, age, rank);
 
-            node = makeNode<BridgeTapNode> (params.processState, std::move (node), p, *tap, params.bridgeBuild, rank,
+            node = makeNode<BridgeTapNode> (params.processState, std::move (sharedInput), std::move (wet), p, *tap,
+                                            params.bridgeBuild, rank,
                                             params.sampleRate, params.blockSize, params.forRendering);
         }
         else if (auto meterPlugin = dynamic_cast<LevelMeterPlugin*> (p))

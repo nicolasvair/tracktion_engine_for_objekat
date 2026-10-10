@@ -57,6 +57,16 @@ struct BridgeTapSource
     // level, applied at the tap: the signal passing through is never touched).
     virtual EditItemID getBridgeTargetAuxClipID() const     { return {}; }
     virtual bool processesTapCopy() const                   { return false; }
+
+    // A send that carries PLUGINS (docs/plan_sends_rework.md §D.2.A): its mini-chain, processed on the
+    // copy between the tap and the level. Null or without an enabled plugin = no wet branch is built
+    // and the tap node is exactly the one above. Message thread (the builder).
+    virtual PluginList* getTapChain()                       { return nullptr; }
+
+    /// What the send does to its copy BEFORE its plugins (the sender's window and fades): called once
+    /// per block, in both modes, on the audio thread, at the edit time the signal was made.
+    virtual void processTapHead (juce::AudioBuffer<float>&, int /*start*/, int /*numSamples*/,
+                                 TimeRange /*editTime*/)    {}
 };
 
 //==============================================================================
