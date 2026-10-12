@@ -101,9 +101,46 @@ bool ChannelRemappingNode::isReadyToProcess()
     return input->hasProcessed();
 }
 
-void ChannelRemappingNode::prepareToPlay (const tracktion::graph::PlaybackInitialisationInfo&)
+void ChannelRemappingNode::prepareToPlay (const tracktion::graph::PlaybackInitialisationInfo& info)
 {
     // Nothing special needed - input handles its own preparation
+
+    // Patch local Objekat (0041) — room for a copy of the input, used only when the output
+    // buffer turns out to be the input buffer (@see processExplicitMapping).
+    if (mode == Mode::ExplicitMapping)
+    {
+        const auto numInputChannels = std::max (1, input->getNodeProperties().numberOfChannels);
+        aliasedInputCopy.resize ({ static_cast<choc::buffer::ChannelCount> (numInputChannels),
+                                   static_cast<choc::buffer::FrameCount> (std::max (1, info.blockSize)) });
+    }
+}
+
+namespace
+{
+    // Patch local Objekat (0041) — whether two views overlap in memory (channel by channel).
+    bool viewsShareMemory (const choc::buffer::ChannelArrayView<float>& a,
+                           const choc::buffer::ChannelArrayView<float>& b)
+    {
+        const auto na = a.getNumFrames(), nb = b.getNumFrames();
+
+        if (na == 0 || nb == 0)
+            return false;
+
+        for (choc::buffer::ChannelCount i = 0; i < a.getNumChannels(); ++i)
+        {
+            const float* pa = a.getChannel (i).data.data;
+
+            for (choc::buffer::ChannelCount j = 0; j < b.getNumChannels(); ++j)
+            {
+                const float* pb = b.getChannel (j).data.data;
+
+                if (pa < pb + nb && pb < pa + na)
+                    return true;
+            }
+        }
+
+        return false;
+    }
 }
 
 void ChannelRemappingNode::process (ProcessContext& pc)
@@ -122,14 +159,35 @@ void ChannelRemappingNode::processExplicitMapping (ProcessContext& pc)
     // Always pass through MIDI
     pc.buffers.midi.copyFrom (inputBuffers.midi);
 
+    auto sourceAudio = inputBuffers.audio;
+
+    // Patch local Objekat (0041) — the mapping ADDS into its destination, which is only right on a
+    // cleared buffer (ClearBuffers::yes). When the destination IS the input — every node of a linear
+    // TimedNode chain processes in one shared view, the clip's plugin list being one — the input was
+    // added onto itself: a mono source converted to stereo for the first plugin of a clip's chain came
+    // out at twice its level (+6.02 dB, both channels), and any remap read sources it had already
+    // overwritten. So, when they overlap, the input is copied aside, the destination cleared, and the
+    // mapping reads the copy: exactly what a non-aliased (cleared) destination would have received.
+    if (viewsShareMemory (sourceAudio, pc.buffers.audio))
+    {
+        const auto numChannels = std::min (sourceAudio.getNumChannels(), aliasedInputCopy.getNumChannels());
+        const auto numFrames = std::min (sourceAudio.getNumFrames(), aliasedInputCopy.getNumFrames());
+        jassert (numChannels == sourceAudio.getNumChannels() && numFrames == sourceAudio.getNumFrames());
+
+        auto copyView = aliasedInputCopy.getView().getFirstChannels (numChannels).getStart (numFrames);
+        copy (copyView, sourceAudio.getFirstChannels (numChannels).getStart (numFrames));
+        pc.buffers.audio.clear();
+        sourceAudio = copyView;
+    }
+
     // Remap audio channels - use add() to accumulate (allows multiple sources to one dest)
     for (const auto& e : channelMap.entries)
     {
-        if (e.source < static_cast<int> (inputBuffers.audio.getNumChannels())
+        if (e.source < static_cast<int> (sourceAudio.getNumChannels())
             && e.dest < static_cast<int> (pc.buffers.audio.getNumChannels()))
         {
             auto destChan = pc.buffers.audio.getChannel (static_cast<choc::buffer::ChannelCount> (e.dest));
-            auto srcChan = inputBuffers.audio.getChannel (static_cast<choc::buffer::ChannelCount> (e.source));
+            auto srcChan = sourceAudio.getChannel (static_cast<choc::buffer::ChannelCount> (e.source));
 
             if (e.gain == 1.0f)
                 add (destChan, srcChan);

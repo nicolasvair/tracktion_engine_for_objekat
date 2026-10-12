@@ -84,6 +84,11 @@ private:
     // Explicit mapping mode
     ChannelMap channelMap;
 
+    // Patch local Objekat (0041) — a copy of the input, taken when the output buffer IS the input
+    // buffer (a linear TimedNode chain shares one view between all its nodes; node memory sharing
+    // can do the same). Allocated in prepareToPlay, never on the audio thread.
+    choc::buffer::ChannelArrayBuffer<float> aliasedInputCopy;
+
     // Processor passthrough mode
     ChannelConfiguration inputChannelConfig;
     ChannelConfiguration processorChannelConfig;
