@@ -513,6 +513,9 @@ namespace tracktion::inline engine
 #include "midi/tracktion_MidiChannel.h"
 #include "midi/tracktion_MidiList.h"
 
+// Objekat: before Plugin.h, which holds a LevelMeasurer by value (objOutputMeasurer).
+#include "playback/tracktion_LevelMeasurer.h"
+
 #include "plugins/tracktion_PluginWindowState.h"
 #include "plugins/tracktion_Plugin.h"
 #include "plugins/tracktion_PluginList.h"
@@ -530,8 +533,6 @@ namespace tracktion::inline engine
 #include "utilities/tracktion_PropertyStorage.h"
 #include "utilities/tracktion_UIBehaviour.h"
 #include "utilities/tracktion_Engine.h"
-
-#include "playback/tracktion_LevelMeasurer.h"
 
 #include "plugins/external/tracktion_VSTXML.h"
 #include "plugins/external/tracktion_ExternalPlugin.h"

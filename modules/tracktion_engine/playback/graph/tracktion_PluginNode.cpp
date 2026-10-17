@@ -299,6 +299,18 @@ void PluginNode::process (ProcessContext& pc)
     // Some plugins flake and add NaNs so zero these out to avoid killing all the audio downstream
     sanitise (outputAudioView);
    #endif
+
+    // Objekat — RMS of the plugin's output for the synoptic's level lines. Only when somebody
+    // asked (atomic flag), the plugin is really processing (enabled, track audible) and this is
+    // not an offline render (an export must not feed the live meters). No node, no buffer.
+    if (plugin->objOutputMeteringEnabled.load (std::memory_order_relaxed)
+         && ! isRendering
+         && shouldProcessPlugin
+         && plugin->isEnabled())
+    {
+        auto meterBuffer = toAudioBuffer (outputAudioView);
+        plugin->objOutputMeasurer.processBuffer (meterBuffer, 0, meterBuffer.getNumSamples());
+    }
 }
 
 //==============================================================================

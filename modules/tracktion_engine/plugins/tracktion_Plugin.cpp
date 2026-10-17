@@ -109,6 +109,8 @@ Plugin::Plugin (PluginCreationInfo info)
 
     state.addListener (this);
 
+    objOutputMeasurer.setMode (LevelMeasurer::RMSMode);   // Objekat: output meter (RMS)
+
    #if TRACKTION_ENABLE_AUTOMAP && TRACKTION_ENABLE_CONTROL_SURFACES
     if (! edit.isLoading())
     {

@@ -214,6 +214,17 @@ public:
     bool isProcessingEnabled() const noexcept               { return processing; }
 
     //==============================================================================
+    // Objekat — output metering, WITHOUT an extra graph node.
+
+    /** Measures the plugin's OUTPUT (RMS), at the end of PluginNode::process, when
+        objOutputMeteringEnabled is true. The app attaches a LevelMeasurer::Client to it.
+        Nothing is measured while the plugin is disabled/bypassed, muted by its track or
+        during an offline render: the clients then read silence. Adds no node to the graph
+        and triggers no rebuild — an atomic flag is the only thing that changes. */
+    LevelMeasurer objOutputMeasurer;
+    std::atomic<bool> objOutputMeteringEnabled { false };
+
+    //==============================================================================
     /** Gives the plugin a chance to set itself up before being played.
         This won't be called concurrently with the process thread.
 
