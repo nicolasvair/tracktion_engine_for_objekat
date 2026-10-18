@@ -1112,7 +1112,8 @@ bool WaveCompManager::renderTake (CompRenderContext& context, Edit& edit, AudioF
 
             auto takeFile = AudioFile (context.engine, context.engine.getProjectManager().findSourceFile (takeRef));
 
-            auto node = tracktion::graph::makeNode<WaveNode> (takeFile, totalRange, TimeDuration(), TimeRange(), LiveClipLevel(), 1.0,
+            // Patch local Objekat — 0043 : WaveNodeRealTime, plus l'ancien WaveNode.
+            auto node = tracktion::graph::makeNode<WaveNodeRealTime> (takeFile, totalRange, TimeDuration(), TimeRange(), LiveClipLevel(), 1.0,
                                                               ChannelConfiguration::discreteChannels (takeFile.getInfo().numChannels),
                                                               ChannelConfiguration::stereo(),
                                                               processState,

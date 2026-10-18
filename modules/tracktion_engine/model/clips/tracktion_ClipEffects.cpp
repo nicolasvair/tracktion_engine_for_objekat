@@ -442,7 +442,8 @@ struct AudioNodeRenderJob  : public ClipEffect::ClipEffectRenderJob
     std::unique_ptr<tracktion::graph::Node> createWaveNodeForFile (const AudioFile& file, TimeRange timeRange)
     {
         auto channelConfig = ChannelConfiguration::discreteChannels (std::max (file.getInfo().numChannels, 1));
-        return tracktion::graph::makeNode<WaveNode> (file, timeRange, TimeDuration(), TimeRange(), LiveClipLevel(), 1.0,
+        // Patch local Objekat — 0043 : WaveNodeRealTime, plus l'ancien WaveNode.
+        return tracktion::graph::makeNode<WaveNodeRealTime> (file, timeRange, TimeDuration(), TimeRange(), LiveClipLevel(), 1.0,
                                                      channelConfig, channelConfig,
                                                      processState,
                                                      EditItemID(), true);
@@ -880,11 +881,14 @@ juce::ReferenceCountedObjectPtr<ClipEffect::ClipEffectRenderJob> FadeInOutEffect
             if (fadeIn.get() > TimeDuration() || fadeOut.get() > TimeDuration())
             {
                 auto channelConfig = ChannelConfiguration::discreteChannels (std::max (sourceFile.getInfo().numChannels, 1));
-                n = tracktion::graph::makeNode<SpeedRampWaveNode> (sourceFile, timeRange, TimeDuration(), TimeRange(), LiveClipLevel(), 1.0,
-                                                                   channelConfig, channelConfig,
-                                                                   job->processState,
-                                                                   EditItemID(), true,
-                                                                   SpeedFadeDescription { fadeInRange, fadeOutRange, fadeInType, fadeOutType });
+                // Patch local Objekat — 0043 : WaveNodeRealTime (SpeedFadeEditReader), plus SpeedRampWaveNode.
+                n = tracktion::graph::makeNode<WaveNodeRealTime> (sourceFile, timeRange, TimeDuration(), TimeRange(), LiveClipLevel(), 1.0,
+                                                                  channelConfig, channelConfig,
+                                                                  job->processState,
+                                                                  EditItemID(), true,
+                                                                  ResamplingQuality::lagrange,
+                                                                  SpeedFadeDescription { fadeInRange, fadeOutRange, fadeInType, fadeOutType },
+                                                                  createPosition (edit.tempoSequence));
             }
 
             break;
