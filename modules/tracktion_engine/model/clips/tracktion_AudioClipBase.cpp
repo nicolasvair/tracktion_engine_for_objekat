@@ -333,6 +333,18 @@ void AudioClipBase::initialise()
         if (currentSourceFile != audioFile.getFile())
             setCurrentSourceFile (audioFile.getFile());
     }
+    else if (! edit.shouldPlay())
+    {
+        // Patch local Objekat — 0044 : une Edit qui ne joue pas (un clone de RENDU, forRendering)
+        // ne lance aucun rendu de source (needsRender() y répond non), si bien qu'un clip inversé
+        // ou à effets de clip y lisait son fichier ORIGINAL — un bounce sortait à l'endroit. Si
+        // l'Edit vivante a déjà rendu la source de ce hash (même dossier temporaire), on l'adopte.
+        auto audioFile = RenderManager::getAudioFileForHash (edit.engine, edit.getTempDirectory (false), getHash());
+
+        if (audioFile.getFile().existsAsFile() && audioFile.isValid()
+             && currentSourceFile != audioFile.getFile())
+            setCurrentSourceFile (audioFile.getFile());
+    }
 
     // Exception will be caught by Edit constructor
     if (! edit.getUndoManager().isPerformingUndoRedo())
