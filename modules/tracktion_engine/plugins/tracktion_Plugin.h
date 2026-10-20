@@ -225,6 +225,40 @@ public:
     std::atomic<bool> objOutputMeteringEnabled { false };
 
     //==============================================================================
+    // Objekat — a probe AROUND the plugin, without an extra graph node (patch 0045).
+
+    /** Called by PluginNode::process on the block it hands the plugin: just before the plugin
+        processes it and just after. Only while the plugin REALLY processes (enabled, track
+        audible) — never in bypass, so whatever a probe does to the signal is bypassed with the
+        plugin. `isRendering` says the block belongs to an offline render: a probe may still
+        change the signal there (a gain must be heard in an export too), but must not feed
+        anything live. Both run on the audio thread: no lock, no allocation. */
+    struct ObjProbe
+    {
+        virtual ~ObjProbe() = default;
+        virtual void objBeforePlugin (juce::AudioBuffer<float>&, double sampleRate, bool isRendering) noexcept = 0;
+        virtual void objAfterPlugin  (juce::AudioBuffer<float>&, double sampleRate, bool isRendering) noexcept = 0;
+    };
+
+    /** Installs the probe, from the message thread, ONCE per plugin: a second call is refused
+        (false). The audio thread reads the raw pointer with no lock, so the probe lives exactly
+        as long as the plugin, which the graph's nodes keep alive. */
+    bool objInstallProbe (std::unique_ptr<ObjProbe> p)
+    {
+        if (p == nullptr || objProbeOwner != nullptr)
+            return false;
+
+        objProbeOwner = std::move (p);
+        objProbe.store (objProbeOwner.get(), std::memory_order_release);
+        return true;
+    }
+
+    ObjProbe* objGetProbe() const noexcept      { return objProbe.load (std::memory_order_acquire); }
+
+    std::unique_ptr<ObjProbe> objProbeOwner;
+    std::atomic<ObjProbe*> objProbe { nullptr };
+
+    //==============================================================================
     /** Gives the plugin a chance to set itself up before being played.
         This won't be called concurrently with the process thread.
 

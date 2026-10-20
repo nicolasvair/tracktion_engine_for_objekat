@@ -212,6 +212,15 @@ void PluginNode::process (ProcessContext& pc)
         }
     }
 
+    // Objekat — the probe around the plugin (patch 0045), only when the plugin really processes.
+    auto* objProbe = (shouldProcessPlugin && plugin->isEnabled()) ? plugin->objGetProbe() : nullptr;
+
+    if (objProbe != nullptr)
+    {
+        auto probeBuffer = toAudioBuffer (outputAudioView);
+        objProbe->objBeforePlugin (probeBuffer, sampleRate, isRendering);
+    }
+
     // Fast path for disabled plugins: skip sub-block loop and pass MIDI straight through
     if (! shouldProcessPlugin)
     {
@@ -293,6 +302,12 @@ void PluginNode::process (ProcessContext& pc)
 
             latencyProcessor->readMIDI (outputBuffers.midi, (int) blockNumSamples);
         }
+    }
+
+    if (objProbe != nullptr && plugin->isEnabled())
+    {
+        auto probeBuffer = toAudioBuffer (outputAudioView);
+        objProbe->objAfterPlugin (probeBuffer, sampleRate, isRendering);
     }
 
    #if TRACKTION_SANITISE_PLUGIN_OUTPUT
