@@ -528,7 +528,27 @@ std::unique_ptr<tracktion::graph::Node> createNodeForAudioClip (AudioClipBase& c
                 speed = clip.getSpeedRatio();
             }
 
-            const auto channelConfig = clip.getOutputChannelConfiguration();
+            auto channelConfig = clip.getOutputChannelConfiguration();
+
+            // Patch local Objekat — 0046 : la configuration se lit dans le fichier JOUÉ ; pour un
+            // clip inversé c'est le rendu inversé, qui n'existe pas encore juste après une
+            // inversion ou un rechargement de la source (il est refait en tâche de fond). Elle
+            // valait alors 0 canal, et un HighQualityResamplerReader à 0 canal s'arrête sur une
+            // assertion (Debug) ou rend du silence. Le rendu a les canaux de l'original.
+            if (channelConfig.getNumChannels() == 0)
+            {
+                const auto original = AudioFile (clip.edit.engine, clip.getOriginalFile()).getInfo();
+
+                if (original.numChannels > 0)
+                {
+                    ChannelConfiguration fromOriginal;
+                    fromOriginal.setNumChannels (original.numChannels);
+                    channelConfig = fromOriginal;
+                }
+            }
+
+            if (channelConfig.getNumChannels() == 0)
+                return {};
 
             // Patch local Objekat — 0043 : un clip à proxy (source compressée, clip inversé, rendu
             // time-stretché) passait par l'ancien WaveNode / SpeedRampWaveNode, dont le
