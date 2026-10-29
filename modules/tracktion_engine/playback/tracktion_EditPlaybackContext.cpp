@@ -255,6 +255,22 @@ struct EditPlaybackContext::NodePlaybackContext
         return TimePosition::fromSeconds (pendingPosition.load (std::memory_order_relaxed));
     }
 
+    /** Audio thread, between nextBlockStarted() and updateReferenceSampleRange(): the (unlooped)
+        edit time of the first sample of the block that fillNextNodeBlock() is about to render. */
+    TimePosition getUnloopedEditTimeOfNextBlock() const
+    {
+        return TimePosition::fromSamples (playHead.referenceSamplePositionToTimelinePositionUnlooped (static_cast<int64_t> (std::llround (referenceStreamRange.getEnd()))),
+                                          getSampleRate());
+    }
+
+    /** True if a position change that will be applied at the start of the next process() call is
+        pending, i.e. the play head does not yet map the next block where it will really sit. */
+    bool hasPendingImmediatePositionChange() const
+    {
+        return positionUpdatePending.load (std::memory_order_acquire)
+                && ! pendingPositionJumpTimeValid.load (std::memory_order_acquire);
+    }
+
     void postRollInToLoop (double newPosition)
     {
         pendingPosition.store (newPosition, std::memory_order_release);
@@ -1188,6 +1204,19 @@ TimePosition EditPlaybackContext::globalStreamTimeToEditTime (double globalStrea
     const auto timelinePosition = nodePlaybackContext->playHead.referenceSamplePositionToTimelinePosition (globalSamplePos);
 
     return TimePosition::fromSamples (timelinePosition, sampleRate);
+}
+
+TimePosition EditPlaybackContext::getUnloopedEditTimeOfNextBlock() const
+{
+    if (! nodePlaybackContext)
+        return TimePosition();
+
+    return nodePlaybackContext->getUnloopedEditTimeOfNextBlock();
+}
+
+bool EditPlaybackContext::hasPendingImmediatePositionChange() const
+{
+    return nodePlaybackContext && nodePlaybackContext->hasPendingImmediatePositionChange();
 }
 
 TimePosition EditPlaybackContext::globalStreamTimeToEditTimeUnlooped (double globalStreamTime) const

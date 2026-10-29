@@ -1241,11 +1241,23 @@ public:
             return;
 
         {
-            const auto blockStart = context.globalStreamTimeToEditTimeUnlooped (streamTime);
+            // objekat 0047: the DeviceManager hands the inputs over after nextBlockStarted() and BEFORE
+            // fillNextNodeBlock(), i.e. while the context's reference range is still the previous block's.
+            // Mapping the device stream time through it puts this block a whole block too early, so ask
+            // the context for the edit time of the block that is about to be rendered instead (the one
+            // these input samples are paired with).
+            const auto blockStart = context.getUnloopedEditTimeOfNextBlock();
+            const auto positionChangePending = context.hasPendingImmediatePositionChange();
             const std::shared_lock sl (contextLock);
 
             for (auto& recordingContext : recordingContexts)
             {
+                // objekat 0047: a start-of-play position change is applied by process(), AFTER this
+                // hand-over. Until it is, the play head does not know where this block will sit, so the
+                // block cannot be mapped: skip it (for a context that has not started yet).
+                if (recordingContext->firstRecCallback && positionChangePending)
+                    continue;
+
                 const TimeRange blockRange (blockStart, TimeDuration::fromSamples (numSamples, recordingContext->sampleRate));
 
                 recordingContext->muteTargetNow = recordingContext->muteTimes.overlaps (blockRange);
@@ -1284,6 +1296,9 @@ public:
 
                         recordingContext->addBlockToRecord (silence.buffer, 0, silence.buffer.getNumSamples());
                         recordingContext->adjustSamples = 0;
+
+                        // objekat 0047: and then the block itself (it used to be lost here)
+                        recordingContext->addBlockToRecord (inputBuffer, 0, numSamples);
                     }
                     else if (adjustSamples > 0)
                     {

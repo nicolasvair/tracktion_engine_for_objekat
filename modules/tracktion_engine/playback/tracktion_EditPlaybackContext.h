@@ -139,6 +139,18 @@ public:
 
     TimePosition globalStreamTimeToEditTime (double) const;
     TimePosition globalStreamTimeToEditTimeUnlooped (double) const;
+
+    /** Audio thread only, between nextBlockStarted() and fillNextNodeBlock() (which is where the
+        DeviceManager hands the inputs over): the unlooped edit time of the first sample of the
+        block that is about to be rendered. Unlike globalStreamTimeToEditTimeUnlooped (streamTime),
+        which maps the CURRENT device block against a reference that is still the previous one.
+        (objekat 0047) */
+    TimePosition getUnloopedEditTimeOfNextBlock() const;
+
+    /** Audio thread only: true if a position change that is not tied to a jump time is waiting to
+        be applied by the next fillNextNodeBlock(), so the play head does not yet say where the next
+        block will really be. (objekat 0047) */
+    bool hasPendingImmediatePositionChange() const;
     void resyncToGlobalStreamTime (juce::Range<double>, double sampleRate);
 
     /** @internal. Will be removed in a future release. */
