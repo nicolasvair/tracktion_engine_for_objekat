@@ -255,10 +255,31 @@ void ContainerClipNode::process (ProcessContext& pc)
 
     assert (! localPlayHead.isLooping() || localPlayHead.getLoopRange().contains (localPlayHead.getPosition()));
 
+    // Objekat 0049 (b) - a jump of the playhead makes the plugins around us flush their notes
+    // (PluginNode: isAllNotesOff on didPlayheadJump): forget ours, they are already gone.
+    if (editPlayHeadState.didPlayheadJump() && numHeldNotes > 0)
+    {
+        heldNotes.fill (0);
+        numHeldNotes = 0;
+    }
+
     // Process
     ProcessContext localPC { pc.numSamples, pc.referenceSampleRange,
                              { pc.buffers.audio, pc.buffers.midi } };
     player.process (localPC);
+
+    // Objekat 0049 (b) - follow what the content played, and in the LAST block we are called for,
+    // end what is still held: after it the chain around us is not processed any more.
+    trackHeldNotes (pc.buffers.midi);
+
+    if (numHeldNotes > 0 && sectionEditSampleRange.getEnd() >= activeSampleRange.getEnd())
+    {
+        const auto blockSeconds = (double) pc.numSamples / sampleRate;
+        const auto lastSample = std::max (0.0, blockSeconds - 1.0 / sampleRate);
+        const auto atEnd = (double) (activeSampleRange.getEnd() - sectionEditSampleRange.getStart()) / sampleRate;
+
+        releaseAllHeldNotes (pc.buffers.midi, juce::jlimit (0.0, lastSample, atEnd));
+    }
 
     // Silence any samples before or after our edit time range.
     // N.B. les bornes sont celles décalées de -L : c'est le CONTENU du container qu'on borne
@@ -275,6 +296,62 @@ void ContainerClipNode::process (ProcessContext& pc)
         if (numSamplesToClearAtEnd > 0)
             destBuffer.getEnd ((choc::buffer::FrameCount) numSamplesToClearAtEnd).clear();
     }
+}
+
+void ContainerClipNode::trackHeldNotes (const MidiMessageArray& midi)
+{
+    for (const auto& m : midi)
+    {
+        if (m.isNoteOn())
+        {
+            const auto slot = (m.getChannel() - 1) * 128 + m.getNoteNumber();
+
+            if (slot >= 0 && slot < numHeldNoteSlots)
+            {
+                if (heldNotes[(size_t) slot] == 0)
+                    ++numHeldNotes;
+
+                heldNotes[(size_t) slot] = m.mpeSourceID + 1u;
+            }
+        }
+        else if (m.isNoteOff())
+        {
+            const auto slot = (m.getChannel() - 1) * 128 + m.getNoteNumber();
+
+            if (slot >= 0 && slot < numHeldNoteSlots && heldNotes[(size_t) slot] != 0)
+            {
+                heldNotes[(size_t) slot] = 0;
+                --numHeldNotes;
+            }
+        }
+        else if (m.isAllNotesOff() || m.isAllSoundOff())
+        {
+            const auto base = (m.getChannel() - 1) * 128;
+
+            for (int n = 0; n < 128; ++n)
+            {
+                if (base + n < numHeldNoteSlots && heldNotes[(size_t) (base + n)] != 0)
+                {
+                    heldNotes[(size_t) (base + n)] = 0;
+                    --numHeldNotes;
+                }
+            }
+        }
+    }
+}
+
+void ContainerClipNode::releaseAllHeldNotes (MidiMessageArray& midi, double timeInBlock)
+{
+    for (int slot = 0; slot < numHeldNoteSlots; ++slot)
+    {
+        if (const auto source = heldNotes[(size_t) slot]; source != 0)
+        {
+            midi.addMidiMessage (juce::MidiMessage::noteOff ((slot / 128) + 1, slot % 128), timeInBlock, source - 1u);
+            heldNotes[(size_t) slot] = 0;
+        }
+    }
+
+    numHeldNotes = 0;
 }
 
 //==============================================================================

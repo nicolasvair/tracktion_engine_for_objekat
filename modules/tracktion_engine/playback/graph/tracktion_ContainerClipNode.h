@@ -65,6 +65,18 @@ private:
     };
 
     std::shared_ptr<PlayerContext> playerContext;
+
+    // Objekat 0049 (b) - the notes this node has handed to the chain around it and not yet ended.
+    // The chain (an instrument mounted on the group) is only called while this node is inside its
+    // activation window: a note still held at the window's end would never receive its note-off, stay
+    // frozen in the instrument and sound again on the next entry into the window. Fixed size, no
+    // allocation on the audio thread; 0 = not held, otherwise the MPE source id + 1.
+    static constexpr int numHeldNoteSlots = 16 * 128;
+    std::array<uint32_t, numHeldNoteSlots> heldNotes {};
+    int numHeldNotes = 0;
+
+    void trackHeldNotes (const MidiMessageArray&);
+    void releaseAllHeldNotes (MidiMessageArray&, double timeInBlock);
 };
 
 

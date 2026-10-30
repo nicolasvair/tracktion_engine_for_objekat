@@ -135,6 +135,10 @@ void MidiNode::processSection (Node::ProcessContext& pc,
         return;
     }
 
+    // Objekat 0049 (a) - the mute is over: re-arm the note-offs of the NEXT mute. wasMute was only ever
+    // set, so from the second mute on no note-off was sent and the held note stayed stuck.
+    wasMute = false;
+
     if (! getPlayHeadState().isContiguousWithPreviousBlock() || localTime.getStart() <= 0.00001 || shouldCreateMessagesForTime)
     {
         MidiNodeHelpers::createMessagesForTime (pc.buffers.midi, sequence, localTime.getStart(),

@@ -267,10 +267,15 @@ void PluginNode::process (ProcessContext& pc)
                                                                          outputAudioBuffer));
 
             // Then copy the buffers to the outputs
+            // Objekat 0049 (c) - the plugin saw its MIDI relative to the START OF THE SUB-BLOCK (input
+            // loop above) and hands it back the same way: put the sub-block's offset back so the
+            // timestamps are relative to the block again. Without it every message of a sub-block > 0
+            // moved EARLIER by the offset (128 samples = 2.67 ms) as soon as a plugin on the chain has
+            // automation (sub-blocks of 128).
             if (subBlockNum == 0)
                 outputBuffers.midi.swapWith (midiMessageArray);
             else
-                outputBuffers.midi.mergeFrom (midiMessageArray);
+                outputBuffers.midi.mergeFromWithOffset (midiMessageArray, subBlockTimeRange.getStart().inSeconds());
 
             numSamplesDone += numSamplesThisBlock;
             numSamplesLeft -= numSamplesThisBlock;

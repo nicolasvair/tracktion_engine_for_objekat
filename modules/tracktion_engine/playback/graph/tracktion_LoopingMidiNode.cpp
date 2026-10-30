@@ -1509,6 +1509,9 @@ void LoopingMidiNode::process (ProcessContext& pc)
         return;
     }
 
+    // Objekat 0049 (a) - re-arm the note-offs of the next mute (see MidiNode::processSection).
+    wasMute = false;
+
     generatorAndNoteList->processSection (pc.buffers.midi, pc.numSamples,
                                           getEditBeatRange(),
                                           getEditTimeRange(),
