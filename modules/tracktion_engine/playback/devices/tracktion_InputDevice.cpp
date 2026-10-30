@@ -264,6 +264,20 @@ void InputDeviceInstance::updateRecordingStatus()
         if (! track)
             continue;
 
+        // objekat 0048: arming a destination that is already recording (the record was started in the
+        // same message-loop turn as the arm, so this deferred update only runs once the take is under
+        // way) must not punch it out. The stop below would end the take, and the restart only happens
+        // when the stop produced no clip: after more than ~10 ms the clip exists, nothing restarts, and
+        // the input stays silent while the transport carries on.
+        if (isRecordingEnabled (targetID) && isRecording (targetID))
+        {
+            if (destinationsChanged)
+                restartPlayback = true;
+
+            wasLivePlayActive = isLivePlayEnabled (*track);
+            continue;
+        }
+
         InputDeviceInstance::StopRecordingParameters params;
         params.targetsToStop = { targetID };
         params.unloopedTimeToEndRecording = context.getUnloopedPosition();
