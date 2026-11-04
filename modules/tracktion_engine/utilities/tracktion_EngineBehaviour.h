@@ -141,6 +141,13 @@ public:
     /// Should track contents be audible whilst a recording is in progress
     virtual bool muteTrackContentsWhilstRecording()                                 { return false; }
 
+    /// objekat 0050. When true a recording goes THROUGH the transport's loop instead of being cut into
+    /// takes: the clock the recorders read (stop time, input block times, MIDI time stamps) is a
+    /// monotone one, anchored at the press and never rebased, the play head's passes (where the
+    /// timeline jumps) are journalled (@see EditPlaybackContext::getRecordJournal), the file stays one
+    /// continuous file whatever the loop does, and a loop can be started, moved or stopped while it records.
+    virtual bool recordsThroughLoop()                                               { return false; }
+
     /// 0 = normal, 1 = high, 2 = realtime
     virtual void setProcessPriority (int /*level*/)                                 {}
 

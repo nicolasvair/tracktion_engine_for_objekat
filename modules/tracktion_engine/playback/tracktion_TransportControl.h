@@ -103,6 +103,10 @@ public:
     */
     void stopIfRecording();
 
+    /** objekat 0050. While recording through a loop: hands the transport's loop (on/off and bounds) to the play
+        head now, which keeps its position. Nothing otherwise. */
+    void applyLoopToPlayHeadNow();
+
     /** Stops recording without stopping playback. */
     void stopRecording (bool discardRecordings = false);
 
@@ -403,6 +407,8 @@ private:
     TimecodeSnapType currentSnapType;
     bool isDelayedChangePending = false;
     int loopUpdateCounter = 10;
+    bool appliedLoopValid = false, appliedLoopOn = false;   // objekat 0050: the last loop handed to the play head
+    TimeRange appliedLoopRange;
     bool isStopInProgress = false;
     bool recordingIsStoppingFlag = false;
 

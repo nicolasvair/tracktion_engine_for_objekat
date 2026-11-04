@@ -1328,7 +1328,7 @@ InputDeviceInstance::RecordingParameters getDefaultRecordingParameters (const Ed
         if (playStart < loopRange.getEnd() - 0.5s)
             params.punchRange = params.punchRange.withEnd (loopRange.getEnd());
     }
-    else if (context.isLooping())
+    else if (context.isLooping() && ! edit.engine.getEngineBehaviour().recordsThroughLoop())   // objekat 0050: the take starts at the press, not at the loop's start
     {
         params.punchRange = params.punchRange.withStart (context.getLoopTimes().getStart());
     }

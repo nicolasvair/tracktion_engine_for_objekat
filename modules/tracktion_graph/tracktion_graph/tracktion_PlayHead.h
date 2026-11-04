@@ -102,6 +102,13 @@ public:
     /** Sets a playback range and whether to loop or not. */
     void setLoopRange (bool loop, juce::Range<int64_t> loopRange, bool updatePosition = true);
 
+    /** objekat 0050. Switches the loop on, moves it or switches it off WHILE playing, without ever
+        moving the head: it keeps its current position, the new bounds only decide where the NEXT wrap
+        happens. A head before the region plays on and enters it (roll-in); a head at or after the
+        region's end, or loop == false, leaves the head playing straight on.
+    */
+    void setLoopRangeRollingIn (bool loop, juce::Range<int64_t> loopRange);
+
     /** Puts the play head in to roll in to loop mode.
         If this position is before the loop start position, the play head won't
         be wrapped to enable count in to loop recordings etc.
@@ -266,6 +273,33 @@ inline void PlayHead::setLoopRange (bool loop, juce::Range<int64_t> loopRange, b
 
         if (updatePosition)
             setPosition (lastPos);
+    }
+}
+
+inline void PlayHead::setLoopRangeRollingIn (bool loop, juce::Range<int64_t> loopRange)
+{
+    // The unlooped clock restarts at the head's current position (so that wrapping it in the new
+    // bounds gives the head back where it is), THEN the bounds and the flags change.
+    const auto pos = getPosition();
+
+    SyncPositions newSyncPositions;
+    newSyncPositions.referenceSyncPosition = referenceSampleRange.load().getStart();
+    newSyncPositions.playoutSyncPosition = pos;
+    setSyncPositions (newSyncPositions);
+
+    if (loop && loopRange.getLength() > 0 && pos < loopRange.getEnd())
+    {
+        timelinePlayRange.store (loopRange);
+        rollInToLoop = pos < loopRange.getStart();
+        looping = true;
+    }
+    else
+    {
+        looping = false;
+        rollInToLoop = false;
+
+        if (loopRange.getLength() > 0)
+            timelinePlayRange.store (loopRange);
     }
 }
 

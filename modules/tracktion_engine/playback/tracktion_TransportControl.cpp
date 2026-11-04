@@ -265,7 +265,11 @@ private:
             }
             else if (i == IDs::looping)
             {
-                transport.stopIfRecording();
+                // objekat 0050: a loop can be switched on and off under a recording
+                if (transport.engine.getEngineBehaviour().recordsThroughLoop())
+                    transport.applyLoopToPlayHeadNow();
+                else
+                    transport.stopIfRecording();
 
                 auto& ecm = transport.engine.getExternalControllerManager();
 
@@ -618,6 +622,11 @@ struct TransportControl::PlayHeadWrapper
 
     TimePosition getUnloopedPosition() const
     {
+        // objekat 0050: the recording clock when there is one (the play head's own unlooped clock is
+        // rebased by every loop edit)
+        if (transport.playbackContext && transport.playbackContext->isRecordClockActive())
+            return transport.playbackContext->getUnloopedPosition();
+
         if (auto ph = getNodePlayHead())
             return TimePosition::fromSamples (ph->getUnloopedPosition(), getSampleRate());
 
@@ -662,6 +671,13 @@ struct TransportControl::PlayHeadWrapper
     {
         if (auto ph = getNodePlayHead())
             ph->setLoopRange (loop, tracktion::toSamples (newRange, getSampleRate()));
+    }
+
+    /** objekat 0050: the loop is switched on, moved or off with the head left where it is. */
+    void setLoopRangeRollingIn (bool loop, TimeRange newRange)
+    {
+        if (auto ph = getNodePlayHead())
+            ph->setLoopRangeRollingIn (loop, tracktion::toSamples (newRange, getSampleRate()));
     }
 
     void setUserIsDragging (bool isDragging)
@@ -1104,8 +1120,17 @@ void TransportControl::timerCallback()
         }
     }
 
+    // objekat 0050: under a recording the loop reaches the play head at once (and not every 10th tick)
+    if (engine.getEngineBehaviour().recordsThroughLoop() && isRecording())
+    {
+        applyLoopToPlayHeadNow();
+
+        if (playbackContext)
+            playbackContext->drainRecordJournal();
+        loopUpdateCounter = 10;
+    }
     // Periodically update the loop times from the transport state
-    if (--loopUpdateCounter == 0)
+    else if (--loopUpdateCounter == 0)
     {
         loopUpdateCounter = 10;
 
@@ -1228,12 +1253,35 @@ void TransportControl::setLoopPoint2 (TimePosition t)
     loopPoint2 = juce::jlimit (0_tp, toPosition (edit.getLength() + Edit::getMaximumLength() * 0.75), t);
 }
 
+void TransportControl::applyLoopToPlayHeadNow()
+{
+    // objekat 0050. Only while recording through a loop: the transport's loop (on/off, bounds) is handed to the
+    // play head now, which keeps its position (@see PlayHead::setLoopRangeRollingIn). Same loop as the last
+    // time = nothing to do.
+    if (! playbackContext || ! isRecording() || ! engine.getEngineBehaviour().recordsThroughLoop())
+        return;
+
+    auto lr = getLoopRange();
+    lr = lr.withEnd (std::max (lr.getEnd(), lr.getStart() + 0.001s));
+    const bool loop = looping.get();
+
+    if (appliedLoopValid && appliedLoopOn == loop && appliedLoopRange == lr)
+        return;
+
+    appliedLoopValid = true;
+    appliedLoopOn = loop;
+    appliedLoopRange = lr;
+    playHeadWrapper->setLoopRangeRollingIn (loop, lr);
+}
+
 void TransportControl::setLoopRange (TimeRange times)
 {
     auto maxEndTime = toPosition (edit.getLength() + Edit::getMaximumLength() * 0.75);
 
     loopPoint1 = juce::jlimit (0_tp, maxEndTime, times.getStart());
     loopPoint2 = juce::jlimit (0_tp, maxEndTime, times.getEnd());
+
+    applyLoopToPlayHeadNow();   // objekat 0050 (a no-op unless recording through a loop)
 }
 
 TimeRange TransportControl::getLoopRange() const noexcept
@@ -1426,6 +1474,7 @@ std::optional<std::pair<SyncPoint, std::optional<TimeRange>>> TransportControl::
 
     CRASH_TRACER
     sectionPlayer.reset();
+    appliedLoopValid = false;   // objekat 0050
     std::optional<SyncPoint> punchInPoint;
     std::optional<TimeRange> punchRange;
 
@@ -1460,7 +1509,24 @@ std::optional<std::pair<SyncPoint, std::optional<TimeRange>>> TransportControl::
                 transportState->startTime   = position.get();
                 transportState->endTime     = Edit::getMaximumEditEnd();
 
-                if (looping)
+                // objekat 0050: recording through the loop starts from the caret, with no minimum loop
+                // length; a caret at or after the loop's end records straight on (the loop reaches the
+                // head later, when it applies)
+                const bool throughLoop = engine.getEngineBehaviour().recordsThroughLoop();
+                appliedLoopValid = false;
+
+                if (throughLoop)
+                {
+                    if (looping.get() && edit.recordingPunchInOut)
+                    {
+                        engine.getUIBehaviour().showWarningMessage (TRANS("Recording can be done in either loop mode or punch in/out mode, but not both at the same time!"));
+                        return std::nullopt;
+                    }
+
+                    if (abs (transportState->startTime) < 0.005s)
+                        transportState->startTime = 0s;
+                }
+                else if (looping)
                 {
                     if (loopRange.getLength() < 2s)
                     {
@@ -1522,7 +1588,7 @@ std::optional<std::pair<SyncPoint, std::optional<TimeRange>>> TransportControl::
                     if (edit.getNumCountInBeats() > 0)
                         playHeadWrapper->setLoopTimes (true, { transportState->startTime.get(), Edit::getMaximumEditEnd() });
 
-                    if (looping)
+                    if (looping && (! throughLoop || transportState->startTime.get() < getLoopRange().getEnd()))
                     {
                         // The order of this is critical as the audio thread might jump in and reset the
                         // roll-in-to-loop status of the loop-range is not set first
@@ -1622,8 +1688,12 @@ std::optional<SyncPoint> TransportControl::performStopRecording()
         const bool discardRecordings = transportState->discardRecordings;
         const auto syncPoint = playbackContext->getSyncPoint();
         assert (syncPoint);
-        playbackContext->stopRecording (syncPoint->unloopedTime, discardRecordings)
+        // objekat 0050: the recording clock, when there is one, tells where the recording ends
+        const auto unloopedEnd = playbackContext->isRecordClockActive() ? playbackContext->getUnloopedPosition()
+                                                                        : syncPoint->unloopedTime;
+        playbackContext->stopRecording (unloopedEnd, discardRecordings)
             .map_error ([this] (auto err) { engine.getUIBehaviour().showWarningAlert (TRANS("Recording"), err); });
+        playbackContext->endRecordClock();   // objekat 0050
 
         sendChangeMessage();
         listeners.call (&TransportControl::Listener::recordingStopped, *syncPoint, discardRecordings);
@@ -1669,9 +1739,14 @@ void TransportControl::performStop()
         playbackContext->stopRecording (recEndTime, transportState->discardRecordings)
             .map_error ([this] (auto err) { engine.getUIBehaviour().showWarningAlert (TRANS("Recording"), err); });
 
+        // objekat 0050: the head's own position is the truth when recording through a loop (the recording
+        // clock counts every lap, and the loop may have been switched off since)
+        const bool throughLoop = playbackContext->isRecordClockActive();
+        playbackContext->endRecordClock();
+
         position = transportState->discardRecordings ? transportState->startTime.get()
-                                                     : (looping ? recEndPos
-                                                                : recEndTime);
+                                                     : ((looping || throughLoop) ? recEndPos
+                                                                                 : recEndTime);
 
         listeners.call (&TransportControl::Listener::recordingStopped, *syncPoint, transportState->discardRecordings);
     }

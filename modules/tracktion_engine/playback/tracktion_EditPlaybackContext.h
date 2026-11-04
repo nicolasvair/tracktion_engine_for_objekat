@@ -147,6 +147,46 @@ public:
         (objekat 0047) */
     TimePosition getUnloopedEditTimeOfNextBlock() const;
 
+    //==============================================================================
+    // objekat 0050 - the recording clock and the journal of the passes.
+    // Only used when EngineBehaviour::recordsThroughLoop() is true.
+
+    /** One discontinuity of the play head during a recording: from this instant of the recording clock
+        on, the timeline is at `timelineSample`, advancing one sample per sample. Both are in samples
+        of the context's sample rate. */
+    struct RecordJournalPoint
+    {
+        int64_t clockSample = 0;
+        int64_t timelineSample = 0;
+    };
+
+    /** Message thread. Arms the recording clock: it is anchored by the audio thread at the first block
+        played from now on, to the play head's position there, and then runs one sample per sample of
+        the reference stream, whatever the loop does. The journal is emptied. */
+    void armRecordClock();
+
+    /** Message thread. Ends the recording clock; the journal is kept until the next arm. */
+    void endRecordClock();
+
+    /** True once the audio thread has anchored the clock and until endRecordClock(). */
+    bool isRecordClockActive() const;
+
+    /** Message thread. The points recorded so far (the audio thread's lock-free buffer is emptied into
+        it first): the first is the anchor, the next ones every instant at which the play head did not
+        continue where it was (a loop wrap, a loop edge that moved the head...). */
+    std::vector<RecordJournalPoint> getRecordJournal();
+
+    /** Message thread. Empties the audio thread's buffer into the journal (no copy): called by the transport's
+        tick, so that the buffer never fills up in a long recording. */
+    void drainRecordJournal();
+
+    /** Diagnostic: how many times, since the last arm, the play head's own unlooped clock moved relative to the
+        recording clock (a loop edit rebases the former, never the latter), and by how many samples the last time. */
+    std::pair<int, int64_t> getRecordClockRebaseStats() const;
+
+    /** True if the journal's buffer ever overflowed since the last arm (points were lost). */
+    bool didRecordJournalOverflow() const;
+
     /** Audio thread only: true if a position change that is not tied to a jump time is waiting to
         be applied by the next fillNextNodeBlock(), so the play head does not yet say where the next
         block will really be. (objekat 0047) */

@@ -766,8 +766,17 @@ public:
 
         rc->closeFileWriter();
 
+        // objekat 0050: recording through a loop, a recording is never cut into takes (the file is one
+        // continuous file and the journal says where the head was), and "did we get as far as adding any
+        // sample" is asked of the file, not of a clock
+        const bool throughLoop = edit.engine.getEngineBehaviour().recordsThroughLoop();
+
+        if (throughLoop)
+            isLooping = false;
+
         // If we didn't get as far as adding any samples, delete the header of the file that will have been written
-        if (rc->punchTimes.getStart() >= context.getUnloopedPosition())
+        if (throughLoop ? (rc->file.existsAsFile() && AudioFile (edit.engine, rc->file).getLength() <= 0.0)
+                        : (rc->punchTimes.getStart() >= context.getUnloopedPosition()))
         {
             rc->file.deleteFile();
             return {};
@@ -810,8 +819,10 @@ public:
         if (recordedFileLength <= 1ms)
             return {};
 
-        auto newClipLen = std::min (recordedFileLength,
-                                    recordedRange.getLength());
+        // objekat 0050: the whole file is the recording (its end is not told by a clock that a loop can take back)
+        auto newClipLen = edit.engine.getEngineBehaviour().recordsThroughLoop()
+                            ? recordedFileLength
+                            : std::min (recordedFileLength, recordedRange.getLength());
 
         if (newClipLen <= 0.01s)
         {
@@ -1262,7 +1273,13 @@ public:
 
                 recordingContext->muteTargetNow = recordingContext->muteTimes.overlaps (blockRange);
 
-                if (recordingContext->recordingBlockRange.overlaps (blockRange))
+                // objekat 0050: once the take has started writing, a block is written whatever time the clock
+                // says (never a hole), until the recording's end
+                const bool inRange = (! recordingContext->firstRecCallback && edit.engine.getEngineBehaviour().recordsThroughLoop())
+                                        ? blockRange.getStart() < recordingContext->recordingBlockRange.getEnd()
+                                        : recordingContext->recordingBlockRange.overlaps (blockRange);
+
+                if (inRange)
                 {
                     if (! recordingContext->hasHitThreshold)
                     {

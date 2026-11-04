@@ -839,6 +839,7 @@ public:
         detail::ScopedActiveRecordingDevice scopedActiveRecordingDevice;
         const TimeRange punchRange;
         juce::MidiMessageSequence recorded;
+        double lastRecordedStamp = -1.0e300;   // objekat 0050: the time stamps of a recording never go back
         TimePosition unloopedStopTime;
 
         std::shared_ptr<choc::fifo::SingleReaderSingleWriterFIFO<juce::MidiMessage>> liveNotes;
@@ -1051,9 +1052,23 @@ public:
                 recContext->liveNotes->push (m1);
 
             const std::shared_lock sl (contextLock);
+            const bool monotone = edit.engine.getEngineBehaviour().recordsThroughLoop();
 
             for (auto& recContext : recordingContexts)
-                recContext->recorded.addEvent (m2);
+            {
+                if (monotone)
+                {
+                    // objekat 0050: the recording clock only goes forward; the stamps of the messages (taken on
+                    // another thread than the audio one) may be a hair out of order
+                    const auto t = std::max (m2.getTimeStamp(), recContext->lastRecordedStamp);
+                    recContext->lastRecordedStamp = t;
+                    recContext->recorded.addEvent (juce::MidiMessage (m2, t));
+                }
+                else
+                {
+                    recContext->recorded.addEvent (m2);
+                }
+            }
         }
 
         juce::ScopedLock sl (consumerLock);
@@ -1109,6 +1124,10 @@ public:
 
         if (recContext->recorded.getNumEvents() == 0)
             return {};
+
+        // objekat 0050: recording through a loop is never cut into takes
+        if (edit.engine.getEngineBehaviour().recordsThroughLoop())
+            isLooping = false;
 
         auto track = findAudioTrackForID (edit, recContext->targetID);
         auto clipSlot = track ? nullptr : findClipSlotForID (edit, recContext->targetID);

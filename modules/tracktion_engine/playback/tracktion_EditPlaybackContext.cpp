@@ -259,9 +259,135 @@ struct EditPlaybackContext::NodePlaybackContext
         edit time of the first sample of the block that fillNextNodeBlock() is about to render. */
     TimePosition getUnloopedEditTimeOfNextBlock() const
     {
-        return TimePosition::fromSamples (playHead.referenceSamplePositionToTimelinePositionUnlooped (static_cast<int64_t> (std::llround (referenceStreamRange.getEnd()))),
+        const auto ref = static_cast<int64_t> (std::llround (referenceStreamRange.getEnd()));
+
+        // objekat 0050: the recording clock when there is one (it is never rebased by a loop edit)
+        if (recordClockActive.load (std::memory_order_acquire))
+            return TimePosition::fromSamples (recordClockAt (ref), getSampleRate());
+
+        // Armed, not anchored yet (the inputs of the first block are handed over BEFORE process() anchors
+        // the clock): the anchor will be the head's LOOPED position of this very block, so say that, and not
+        // the unlooped one that is N laps further in a loop that has been running for a while.
+        if (recordClockArmed.load (std::memory_order_acquire) && playHead.isPlaying())
+            return TimePosition::fromSamples (playHead.referenceSamplePositionToTimelinePosition (ref), getSampleRate());
+
+        return TimePosition::fromSamples (playHead.referenceSamplePositionToTimelinePositionUnlooped (ref),
                                           getSampleRate());
     }
+
+    //==============================================================================
+    // objekat 0050 - the recording clock and the journal of the passes
+
+    /** The recording clock at a reference sample position: monotone, one sample per sample. */
+    int64_t recordClockAt (int64_t referenceSamplePosition) const
+    {
+        const auto a = recordAnchor.load();
+        return a.timeline + (referenceSamplePosition - a.reference);
+    }
+
+    /** Message thread. */
+    void armRecordClock()
+    {
+        {
+            const std::lock_guard<std::mutex> lg (journalLock);
+            journal.clear();
+        }
+
+        journalFifo.reset();
+        journalOverflow.store (false, std::memory_order_release);
+        rebaseCount.store (0, std::memory_order_relaxed);
+        lastRebaseJump.store (0, std::memory_order_relaxed);
+        recordClockActive.store (false, std::memory_order_release);
+        recordClockArmed.store (true, std::memory_order_release);
+    }
+
+    /** Message thread. */
+    void endRecordClock()
+    {
+        recordClockArmed.store (false, std::memory_order_release);
+        recordClockActive.store (false, std::memory_order_release);
+    }
+
+    /** Message thread. Empties the audio thread's buffer into the journal and returns a copy of it. */
+    std::vector<EditPlaybackContext::RecordJournalPoint> getRecordJournal()
+    {
+        const std::lock_guard<std::mutex> lg (journalLock);
+        drainJournalLocked();
+        return journal;
+    }
+
+    void drainRecordJournal()
+    {
+        const std::lock_guard<std::mutex> lg (journalLock);
+        drainJournalLocked();
+    }
+
+    /** Audio thread, once per block, after the pending position was applied and before the graph is
+        processed: anchors the clock if it is armed and the head runs, and journals where the head is
+        going to be in this block, split where a loop wraps it. */
+    void updateRecordJournal (juce::Range<int64_t> referenceSampleRange)
+    {
+        if (! recordClockActive.load (std::memory_order_acquire))
+        {
+            if (! recordClockArmed.load (std::memory_order_acquire) || ! playHead.isPlaying())
+                return;
+
+            // Anchor: the looped position of the block's first sample, as the clock of a recording that
+            // starts from the head (the position the recorder was told about is this one, not the
+            // unlooped one, which is many laps further in a loop that has been running a while).
+            const auto anchorPos = playHead.referenceSamplePositionToTimelinePosition (referenceSampleRange.getStart());
+            recordAnchor.store ({ referenceSampleRange.getStart(), anchorPos });
+            lastJournalTimelineEndValid = false;
+            lastStockMinusClockValid = false;
+            recordClockActive.store (true, std::memory_order_release);
+        }
+
+        if (! playHead.isPlaying() || playHead.isUserDragging())
+            return;
+
+        const auto clockStart = recordClockAt (referenceSampleRange.getStart());
+
+        // Diagnostic: how often the head's own unlooped clock (the one the stock engine records with) is
+        // rebased relative to the recording clock, e.g. by a loop edit.
+        {
+            const auto stockMinusClock = playHead.referenceSamplePositionToTimelinePositionUnlooped (referenceSampleRange.getStart()) - clockStart;
+
+            if (lastStockMinusClockValid && stockMinusClock != lastStockMinusClock)
+            {
+                rebaseCount.fetch_add (1, std::memory_order_relaxed);
+                lastRebaseJump.store (stockMinusClock - lastStockMinusClock, std::memory_order_relaxed);
+            }
+
+            lastStockMinusClock = stockMinusClock;
+            lastStockMinusClockValid = true;
+        }
+
+        const auto split = referenceSampleRangeToSplitTimelineRange (playHead, referenceSampleRange);
+
+        if (! lastJournalTimelineEndValid || split.timelineRange1.getStart() != lastJournalTimelineEnd)
+            pushJournalPoint ({ clockStart, split.timelineRange1.getStart() });
+
+        if (split.isSplit)
+        {
+            pushJournalPoint ({ clockStart + split.timelineRange1.getLength(), split.timelineRange2.getStart() });
+            lastJournalTimelineEnd = split.timelineRange2.getEnd();
+        }
+        else
+        {
+            lastJournalTimelineEnd = split.timelineRange1.getEnd();
+        }
+
+        lastJournalTimelineEndValid = true;
+    }
+
+    bool didRecordJournalOverflow() const   { return journalOverflow.load (std::memory_order_acquire); }
+
+    std::pair<int, int64_t> getRecordClockRebaseStats() const
+    {
+        return { rebaseCount.load (std::memory_order_relaxed), lastRebaseJump.load (std::memory_order_relaxed) };
+    }
+    bool isRecordClockActive() const        { return recordClockActive.load (std::memory_order_acquire); }
+    bool isRecordClockArmed() const         { return recordClockArmed.load (std::memory_order_acquire); }
 
     /** True if a position change that will be applied at the start of the next process() call is
         pending, i.e. the play head does not yet map the next block where it will really sit. */
@@ -390,6 +516,8 @@ struct EditPlaybackContext::NodePlaybackContext
             }
         }
 
+        updateRecordJournal (referenceSampleRange);   // objekat 0050
+
         scratchMidiBuffer.clear();
 
         if (isUsingInterpolator || destNumSamples != (int) numSamplesToProcess)
@@ -450,6 +578,51 @@ private:
     MidiMessageArray scratchMidiBuffer;
     TracktionNodePlayer player;
     const size_t maxNumThreads;
+
+    // objekat 0050
+    struct RecordAnchor
+    {
+        int64_t reference = 0;   /**< a position of the reference stream... */
+        int64_t timeline = 0;    /**< ...and the timeline position the head had there. */
+    };
+
+    MultipleWriterSeqLock<RecordAnchor> recordAnchor;
+    std::atomic<bool> recordClockArmed { false }, recordClockActive { false }, journalOverflow { false };
+    static constexpr int journalCapacity = 8192;
+    juce::AbstractFifo journalFifo { journalCapacity };
+    std::array<EditPlaybackContext::RecordJournalPoint, (size_t) journalCapacity> journalSlots;
+    std::mutex journalLock;
+    std::vector<EditPlaybackContext::RecordJournalPoint> journal;       // message thread, under journalLock
+    int64_t lastJournalTimelineEnd = 0;                                 // audio thread
+    bool lastJournalTimelineEndValid = false;
+    int64_t lastStockMinusClock = 0;                                    // audio thread
+    bool lastStockMinusClockValid = false;
+    std::atomic<int> rebaseCount { 0 };
+    std::atomic<int64_t> lastRebaseJump { 0 };
+
+    void pushJournalPoint (EditPlaybackContext::RecordJournalPoint p)
+    {
+        const auto scope = journalFifo.write (1);
+
+        if (scope.blockSize1 > 0)
+            journalSlots[(size_t) scope.startIndex1] = p;
+        else
+            journalOverflow.store (true, std::memory_order_release);
+    }
+
+    void drainJournalLocked()
+    {
+        for (;;)
+        {
+            const auto scope = journalFifo.read (journalFifo.getNumReady());
+
+            if (scope.blockSize1 + scope.blockSize2 == 0)
+                return;
+
+            for (int i = 0; i < scope.blockSize1; ++i)  journal.push_back (journalSlots[(size_t) (scope.startIndex1 + i)]);
+            for (int i = 0; i < scope.blockSize2; ++i)  journal.push_back (journalSlots[(size_t) (scope.startIndex2 + i)]);
+        }
+    }
 
     int latencySamples = 0;
     choc::buffer::FrameCount numSamplesToProcess = 0;
@@ -773,6 +946,9 @@ juce::Result EditPlaybackContext::startRecording (TimePosition start, TimePositi
                 return juce::Result::fail (res.error());
 
     // Now start the recordings
+    if (edit.engine.getEngineBehaviour().recordsThroughLoop())
+        armRecordClock();   // objekat 0050
+
     startPlaying (start);
 
     for (auto& inputAndContext : inputAndContexts)
@@ -1095,8 +1271,51 @@ TimePosition EditPlaybackContext::getPosition() const
 
 TimePosition EditPlaybackContext::getUnloopedPosition() const
 {
+    // objekat 0050: the recording clock when there is one
+    if (nodePlaybackContext->isRecordClockActive())
+        return TimePosition::fromSamples (nodePlaybackContext->recordClockAt (nodePlaybackContext->playHead.getReferenceSampleRange().getStart()),
+                                          nodePlaybackContext->getSampleRate());
+
     return TimePosition::fromSamples (nodePlaybackContext->playHead.getUnloopedPosition(),
                                       nodePlaybackContext->getSampleRate());
+}
+
+void EditPlaybackContext::armRecordClock()
+{
+    if (nodePlaybackContext)
+        nodePlaybackContext->armRecordClock();
+}
+
+void EditPlaybackContext::endRecordClock()
+{
+    if (nodePlaybackContext)
+        nodePlaybackContext->endRecordClock();
+}
+
+bool EditPlaybackContext::isRecordClockActive() const
+{
+    return nodePlaybackContext && nodePlaybackContext->isRecordClockActive();
+}
+
+std::vector<EditPlaybackContext::RecordJournalPoint> EditPlaybackContext::getRecordJournal()
+{
+    return nodePlaybackContext ? nodePlaybackContext->getRecordJournal() : std::vector<RecordJournalPoint>();
+}
+
+void EditPlaybackContext::drainRecordJournal()
+{
+    if (nodePlaybackContext)
+        nodePlaybackContext->drainRecordJournal();
+}
+
+std::pair<int, int64_t> EditPlaybackContext::getRecordClockRebaseStats() const
+{
+    return nodePlaybackContext ? nodePlaybackContext->getRecordClockRebaseStats() : std::pair<int, int64_t> { 0, 0 };
+}
+
+bool EditPlaybackContext::didRecordJournalOverflow() const
+{
+    return nodePlaybackContext && nodePlaybackContext->didRecordJournalOverflow();
 }
 
 TimeRange EditPlaybackContext::getLoopTimes() const
@@ -1226,6 +1445,15 @@ TimePosition EditPlaybackContext::globalStreamTimeToEditTimeUnlooped (double glo
 
     const auto sampleRate = getSampleRate();
     const auto globalSamplePos = tracktion::graph::timeToSample (globalStreamTime, sampleRate);
+
+    // objekat 0050: the recording clock when there is one
+    if (nodePlaybackContext->isRecordClockActive())
+        return TimePosition::fromSamples (nodePlaybackContext->recordClockAt (globalSamplePos), sampleRate);
+
+    // armed, not anchored yet: the anchor will be the looped position (see getUnloopedEditTimeOfNextBlock)
+    if (nodePlaybackContext->isRecordClockArmed() && nodePlaybackContext->playHead.isPlaying())
+        return TimePosition::fromSamples (nodePlaybackContext->playHead.referenceSamplePositionToTimelinePosition (globalSamplePos), sampleRate);
+
     const auto timelinePosition = nodePlaybackContext->playHead.referenceSamplePositionToTimelinePositionUnlooped (globalSamplePos);
 
     return TimePosition::fromSamples (timelinePosition, sampleRate);
