@@ -184,7 +184,11 @@ void MidiInputDeviceNode::processSection (ProcessContext& pc, juce::Range<int64_
     auto& mi = midiInputDevice;
     const bool createTakes = mi.recordingEnabled && ! (mi.mergeRecordings || mi.replaceExistingClips);
 
+    // objekat 0051: never replay the passes already played (see isLivePlayOverActive)
+    const bool recordsThroughLoop = instance.edit.engine.getEngineBehaviour().recordsThroughLoop();
+
     if ((! createTakes && ! mi.replaceExistingClips)
+        && ! recordsThroughLoop
         && state->numLiveMessagesToPlay > 0
         && playHeadState.playHead.isPlaying())
     {
@@ -211,6 +215,11 @@ void MidiInputDeviceNode::createProgramChanges (MidiMessageArray& bufferForMidiM
 
 bool MidiInputDeviceNode::isLivePlayOverActive()
 {
+    // objekat 0051: a recording through a loop lays one take per pass (0050); the passes already played are takes,
+    // never an overdub to hear again under the next one
+    if (instance.edit.engine.getEngineBehaviour().recordsThroughLoop())
+        return false;
+
     return instance.isRecording()
         && state->canLoop
         && instance.context.transport.looping;
